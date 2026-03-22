@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YT Transcript Extractor</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <!-- Header -->
+  <div class="header">
+    <h1>YT Transcript Extractor</h1>
+    <p class="subtitle">Download subtitles in MD or SRT format</p>
+  </div>
+
+  <!-- Page Status -->
+  <div id="pageStatus" class="section status-bar">
+    <span id="pageStatusIcon">⏳</span>
+    <span id="pageStatusText">Detecting page...</span>
+  </div>
+
+  <!-- Mode Selection -->
+  <div class="section">
+    <label class="section-label">Download Mode</label>
+    <div class="radio-group">
+      <label class="radio-option">
+        <input type="radio" name="mode" value="single" checked>
+        <span>Single Video</span>
+      </label>
+      <label class="radio-option">
+        <input type="radio" name="mode" value="playlist">
+        <span>Playlist</span>
+      </label>
+      <label class="radio-option">
+        <input type="radio" name="mode" value="channel">
+        <span>Channel</span>
+      </label>
+    </div>
+  </div>
+
+  <!-- Channel Options (visible when channel mode selected) -->
+  <div id="channelOptions" class="section hidden">
+    <label class="section-label">Channel Content</label>
+    <div class="radio-group">
+      <label class="radio-option">
+        <input type="radio" name="channelContent" value="videos" checked>
+        <span>Videos Only</span>
+      </label>
+      <label class="radio-option">
+        <input type="radio" name="channelContent" value="shorts">
+        <span>Shorts Only</span>
+      </label>
+      <label class="radio-option">
+        <input type="radio" name="channelContent" value="both">
+        <span>Both</span>
+      </label>
+    </div>
+  </div>
+
+  <!-- URL Input -->
+  <div class="section">
+    <label class="section-label">YouTube URL</label>
+    <div class="url-input-group">
+      <input type="text" id="urlInput" placeholder="Enter YouTube URL..." autocomplete="off">
+      <button id="useCurrentTab" class="btn-small" title="Use current tab URL">↻</button>
+    </div>
+  </div>
+
+  <!-- Output Format -->
+  <div class="section">
+    <label class="section-label">Output Format</label>
+    <div class="radio-group">
+      <label class="radio-option">
+        <input type="radio" name="format" value="markdown" checked>
+        <span>Markdown (.md)</span>
+      </label>
+      <label class="radio-option">
+        <input type="radio" name="format" value="srt">
+        <span>SRT (.srt)</span>
+      </label>
+    </div>
+  </div>
+
+  <!-- Markdown Options -->
+  <div id="markdownOptions" class="section">
+    <label class="section-label">Markdown File Config</label>
+    <div class="radio-group">
+      <label class="radio-option">
+        <input type="radio" name="mdSplit" value="single" checked>
+        <span>Single File</span>
+      </label>
+      <label class="radio-option">
+        <input type="radio" name="mdSplit" value="split">
+        <span>Split by Word Count</span>
+      </label>
+    </div>
+    <div id="splitConfig" class="sub-option hidden">
+      <label>Max words per file (thousands):</label>
+      <input type="number" id="wordLimit" value="100" min="1" max="1000" class="num-input">
+    </div>
+  </div>
+
+  <!-- Concurrency -->
+  <div class="section">
+    <label class="section-label">Concurrent Fetches: <span id="concurrencyValue">3</span></label>
+    <input type="range" id="concurrency" min="1" max="6" value="3" class="slider">
+  </div>
+
+  <!-- Action Buttons -->
+  <div class="section action-buttons">
+    <button id="startBtn" class="btn-primary">Download Transcripts</button>
+    <button id="resumeBtn" class="btn-secondary hidden">Resume Previous</button>
+  </div>
+
+  <!-- Progress Section -->
+  <div id="progressSection" class="section hidden">
+    <label class="section-label">Progress</label>
+    <div class="progress-bar-container">
+      <div id="progressBar" class="progress-bar" style="width: 0%"></div>
+    </div>
+    <div id="progressPercent" class="progress-percent">0%</div>
+    <div class="stats-row">
+      <span class="stat success">✓ <span id="statSuccess">0</span></span>
+      <span class="stat no-transcript">— <span id="statNoTranscript">0</span></span>
+      <span class="stat failed">✗ <span id="statFailed">0</span></span>
+      <span class="stat remaining">◌ <span id="statRemaining">0</span></span>
+    </div>
+    <div id="currentVideoStatus" class="current-video"></div>
+    <div class="progress-actions">
+      <button id="pauseBtn" class="btn-small">Pause</button>
+      <button id="cancelBtn" class="btn-small btn-danger">Cancel</button>
+    </div>
+  </div>
+
+  <!-- Results Section -->
+  <div id="resultsSection" class="section hidden">
+    <label class="section-label">Results</label>
+    <div id="resultsSummary" class="results-summary"></div>
+    <button id="downloadBtn" class="btn-primary">Download Files</button>
+  </div>
+
+  <!-- Error -->
+  <div id="errorSection" class="section hidden">
+    <div id="errorMessage" class="error-message"></div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
