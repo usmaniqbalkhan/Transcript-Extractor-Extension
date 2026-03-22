@@ -142,7 +142,7 @@ async function handleStart(config) {
     await saveProgress();
 
     state.phase = 'done';
-    chrome.runtime.sendMessage({
+    safeBroadcast({
       action: 'extractionComplete',
       progress: state.progress
     });
@@ -153,7 +153,7 @@ async function handleStart(config) {
     return { success: true };
   } catch (err) {
     state.phase = 'error';
-    chrome.runtime.sendMessage({ action: 'extractionError', error: err.message });
+    safeBroadcast({ action: 'extractionError', error: err.message });
     return { error: err.message };
   }
 }
@@ -214,7 +214,7 @@ async function handleResume(config) {
     return { success: true };
   } catch (err) {
     state.phase = 'error';
-    chrome.runtime.sendMessage({ action: 'extractionError', error: err.message });
+    safeBroadcast({ action: 'extractionError', error: err.message });
     return { error: err.message };
   }
 }
@@ -234,8 +234,11 @@ async function collectVideos(config) {
     return [{ videoId, title: title || videoId }];
   }
 
+  // For playlist/channel, ensure content script is injected first
+  await ensureContentScriptInjected(tabId);
+
   if (mode === 'playlist') {
-    const response = await chrome.tabs.sendMessage(tabId, { action: 'collectPlaylistVideos' });
+    const response = await safeSendToTab(tabId, { action: 'collectPlaylistVideos' });
     if (!response || !response.success) throw new Error(response?.error || 'Failed to collect playlist videos');
     state.sourceName = sanitizeFilename(await getPlaylistTitle(tabId) || 'playlist');
     return response.videos;
@@ -247,14 +250,16 @@ async function collectVideos(config) {
     state.sourceName = sanitizeFilename(channelName || 'channel');
 
     if (channelContent === 'videos' || channelContent === 'both') {
-      const resp = await chrome.tabs.sendMessage(tabId, { action: 'collectChannelVideos', tabName: 'videos' });
+      const resp = await safeSendToTab(tabId, { action: 'collectChannelVideos', tabName: 'videos' });
       if (resp && resp.success) allVideos.push(...resp.videos);
     }
 
     if (channelContent === 'shorts' || channelContent === 'both') {
       // Small delay between tab navigations
       if (channelContent === 'both') await sleep(2000);
-      const resp = await chrome.tabs.sendMessage(tabId, { action: 'collectChannelVideos', tabName: 'shorts' });
+      // Re-inject content script after navigation to new tab
+      await ensureContentScriptInjected(tabId);
+      const resp = await safeSendToTab(tabId, { action: 'collectChannelVideos', tabName: 'shorts' });
       if (resp && resp.success) allVideos.push(...resp.videos);
     }
 
@@ -263,6 +268,47 @@ async function collectVideos(config) {
   }
 
   throw new Error('Invalid mode');
+}
+
+/**
+ * Ensure content script is loaded in the tab. Injects if not present.
+ */
+async function ensureContentScriptInjected(tabId) {
+  try {
+    const response = await safeSendToTab(tabId, { action: 'ping' });
+    if (response && response.pong) return;
+  } catch {
+    // Not loaded
+  }
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['content/content.js']
+    });
+    await sleep(500);
+  } catch (err) {
+    throw new Error('Could not connect to YouTube tab. Please refresh the page and try again.');
+  }
+}
+
+/**
+ * Safely send message to tab, returning null on error instead of throwing.
+ */
+function safeSendToTab(tabId, message) {
+  return new Promise((resolve) => {
+    try {
+      chrome.tabs.sendMessage(tabId, message, (response) => {
+        if (chrome.runtime.lastError) {
+          resolve(null);
+        } else {
+          resolve(response);
+        }
+      });
+    } catch {
+      resolve(null);
+    }
+  });
 }
 
 // ============================================================================
@@ -292,7 +338,7 @@ async function workerLoop(queue, tabId) {
     if (!video) break;
 
     state.progress.currentVideo = video.title;
-    chrome.runtime.sendMessage({ action: 'currentVideo', title: video.title });
+    safeBroadcast({ action: 'currentVideo', title: video.title });
 
     try {
       const result = await extractTranscriptInMainWorld(tabId, video.videoId);
@@ -988,12 +1034,25 @@ async function getChannelName(tabId) {
 }
 
 function broadcastProgress() {
+  safeBroadcast({
+    action: 'progressUpdate',
+    progress: { ...state.progress }
+  });
+}
+
+/**
+ * Safely send a message to popup/other listeners.
+ * Silently ignores "Receiving end does not exist" errors (popup closed).
+ */
+function safeBroadcast(message) {
   try {
-    chrome.runtime.sendMessage({
-      action: 'progressUpdate',
-      progress: { ...state.progress }
+    chrome.runtime.sendMessage(message, () => {
+      // Check lastError to suppress "Receiving end does not exist" console errors
+      if (chrome.runtime.lastError) {
+        // Popup is closed, ignore
+      }
     });
   } catch {
-    // Popup might be closed
+    // Extension context invalidated, ignore
   }
 }

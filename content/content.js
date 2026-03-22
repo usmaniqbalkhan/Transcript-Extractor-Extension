@@ -3,6 +3,13 @@
  * Handles page type detection and video collection from playlists/channels.
  */
 
+// Prevent double-injection
+if (window.__ytTranscriptExtractorLoaded) {
+  // Already loaded, skip
+} else {
+  window.__ytTranscriptExtractorLoaded = true;
+}
+
 let cancelFlag = false;
 
 // ============================================================================
@@ -254,6 +261,11 @@ function waitForNavigation() {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const { action } = message;
 
+  if (action === 'ping') {
+    sendResponse({ pong: true });
+    return false;
+  }
+
   if (action === 'getPageState') {
     sendResponse(detectPageType());
     return false;
@@ -261,7 +273,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (action === 'collectPlaylistVideos') {
     collectPlaylistVideos((progress) => {
-      chrome.runtime.sendMessage({ action: 'collectionProgress', ...progress });
+      try { chrome.runtime.sendMessage({ action: 'collectionProgress', ...progress }, () => { if (chrome.runtime.lastError) {} }); } catch {}
     }).then(videos => {
       sendResponse({ success: true, videos });
     }).catch(err => {
@@ -273,7 +285,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (action === 'collectChannelVideos') {
     const tabName = message.tabName || 'videos';
     collectChannelVideos(tabName, (progress) => {
-      chrome.runtime.sendMessage({ action: 'collectionProgress', ...progress });
+      try { chrome.runtime.sendMessage({ action: 'collectionProgress', ...progress }, () => { if (chrome.runtime.lastError) {} }); } catch {}
     }).then(videos => {
       sendResponse({ success: true, videos });
     }).catch(err => {

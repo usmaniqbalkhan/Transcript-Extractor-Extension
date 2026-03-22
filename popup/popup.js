@@ -45,6 +45,53 @@ let currentTabId = null;
 let keepAlivePort = null;
 
 // ============================================================================
+// Content Script Injection Helper
+// ============================================================================
+
+/**
+ * Ensure content script is injected into the given tab.
+ * If already injected, this is a no-op. If not, injects it programmatically.
+ */
+async function ensureContentScript(tabId) {
+  try {
+    // Try to ping the content script
+    const response = await chrome.tabs.sendMessage(tabId, { action: 'ping' });
+    if (response && response.pong) return true;
+  } catch {
+    // Content script not loaded — inject it
+  }
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['content/content.js']
+    });
+    // Wait a moment for it to initialize
+    await new Promise(r => setTimeout(r, 300));
+    return true;
+  } catch (err) {
+    console.warn('Could not inject content script:', err.message);
+    return false;
+  }
+}
+
+/**
+ * Safely send a message to a tab's content script, injecting it first if needed.
+ */
+async function sendToContentScript(tabId, message) {
+  await ensureContentScript(tabId);
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(tabId, message, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+      } else {
+        resolve(response);
+      }
+    });
+  });
+}
+
+// ============================================================================
 // Initialization
 // ============================================================================
 
@@ -61,14 +108,19 @@ document.addEventListener('DOMContentLoaded', async () => {
   checkSavedProgress();
 
   // Check if extraction is already in progress
-  chrome.runtime.sendMessage({ action: 'getState' }, (response) => {
-    if (response && response.phase === 'fetching') {
-      showProgressUI();
-      updateProgress(response.progress);
-    } else if (response && response.phase === 'done') {
-      showResults(response);
-    }
-  });
+  try {
+    chrome.runtime.sendMessage({ action: 'getState' }, (response) => {
+      if (chrome.runtime.lastError) return; // service worker not ready
+      if (response && response.phase === 'fetching') {
+        showProgressUI();
+        updateProgress(response.progress);
+      } else if (response && response.phase === 'done') {
+        showResults(response);
+      }
+    });
+  } catch {
+    // Service worker not ready yet
+  }
 
   // Setup keep-alive
   setupKeepAlive();
@@ -108,6 +160,7 @@ els.concurrency.addEventListener('input', () => {
 els.useCurrentTab.addEventListener('click', async () => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (tab) {
+    currentTabId = tab.id;
     els.urlInput.value = tab.url || '';
     detectPageState(tab);
   }
@@ -172,7 +225,7 @@ async function detectPageState(tab) {
   }
 
   try {
-    const response = await chrome.tabs.sendMessage(tab.id, { action: 'getPageState' });
+    const response = await sendToContentScript(tab.id, { action: 'getPageState' });
     if (!response) {
       els.pageStatusIcon.textContent = '⚠';
       els.pageStatusText.textContent = 'Page loading... try again';
@@ -200,8 +253,27 @@ async function detectPageState(tab) {
         els.pageStatusText.textContent = 'YouTube page detected';
     }
   } catch {
-    els.pageStatusIcon.textContent = '⚠';
-    els.pageStatusText.textContent = 'Enter a YouTube URL';
+    // Content script could not be loaded — detect from URL only
+    detectFromURL(tab.url);
+  }
+}
+
+function detectFromURL(url) {
+  if (/youtube\.com\/watch\?.*v=/.test(url)) {
+    els.pageStatusIcon.textContent = '🎬';
+    els.pageStatusText.textContent = 'Video detected from URL';
+    setMode('single');
+  } else if (/youtube\.com\/playlist\?.*list=/.test(url)) {
+    els.pageStatusIcon.textContent = '📋';
+    els.pageStatusText.textContent = 'Playlist detected from URL';
+    setMode('playlist');
+  } else if (/youtube\.com\/(@|channel\/|c\/|user\/)/.test(url)) {
+    els.pageStatusIcon.textContent = '📺';
+    els.pageStatusText.textContent = 'Channel detected from URL';
+    setMode('channel');
+  } else {
+    els.pageStatusIcon.textContent = '🔗';
+    els.pageStatusText.textContent = 'YouTube page — select mode manually';
   }
 }
 
@@ -244,9 +316,27 @@ async function startExtraction() {
   els.startBtn.textContent = 'Starting...';
   hideError();
 
+  // Ensure content script is ready before starting
+  if (currentTabId) {
+    const injected = await ensureContentScript(currentTabId);
+    if (!injected && config.mode !== 'single') {
+      showError('Could not connect to YouTube tab. Please refresh the YouTube page and try again.');
+      els.startBtn.disabled = false;
+      els.startBtn.textContent = 'Download Transcripts';
+      return;
+    }
+  }
+
   showProgressUI();
 
   chrome.runtime.sendMessage({ action: 'startExtraction', config }, (response) => {
+    if (chrome.runtime.lastError) {
+      showError('Service worker not ready. Please close and reopen the extension.');
+      hideProgressUI();
+      els.startBtn.disabled = false;
+      els.startBtn.textContent = 'Download Transcripts';
+      return;
+    }
     if (response && response.error) {
       showError(response.error);
       hideProgressUI();
@@ -265,6 +355,13 @@ async function resumeExtraction() {
   const config = getConfig();
 
   chrome.runtime.sendMessage({ action: 'resumeExtraction', config }, (response) => {
+    if (chrome.runtime.lastError) {
+      showError('Service worker not ready. Please close and reopen the extension.');
+      hideProgressUI();
+      els.resumeBtn.disabled = false;
+      els.resumeBtn.textContent = 'Resume Previous';
+      return;
+    }
     if (response && response.error) {
       showError(response.error);
       hideProgressUI();
@@ -275,12 +372,17 @@ async function resumeExtraction() {
 }
 
 async function checkSavedProgress() {
-  chrome.runtime.sendMessage({ action: 'checkSavedProgress' }, (response) => {
-    if (response && response.hasSaved) {
-      els.resumeBtn.classList.remove('hidden');
-      els.resumeBtn.textContent = `Resume (${response.completed}/${response.total} done)`;
-    }
-  });
+  try {
+    chrome.runtime.sendMessage({ action: 'checkSavedProgress' }, (response) => {
+      if (chrome.runtime.lastError) return;
+      if (response && response.hasSaved) {
+        els.resumeBtn.classList.remove('hidden');
+        els.resumeBtn.textContent = `Resume (${response.completed}/${response.total} done)`;
+      }
+    });
+  } catch {
+    // Service worker not ready
+  }
 }
 
 // ============================================================================
