@@ -426,25 +426,43 @@ async function extractTranscriptInMainWorld(tabId, videoId) {
 
 /**
  * This function runs in the MAIN world (YouTube's page context).
- * It has access to same-origin fetch for YouTube APIs.
+ * It has access to same-origin fetch and YouTube's JS globals (ytcfg, ytInitialPlayerResponse).
  */
 async function mainWorldExtractTranscript(videoId) {
   try {
-    // Method 1: InnerTube player API
     let captionTracks = null;
 
+    // Method 1: Use ytcfg (YouTube's config object available on page) for proper API key
     try {
-      const response = await fetch('https://www.youtube.com/youtubei/v1/player', {
+      // Get API key and client version from YouTube's page config
+      const ytcfg = window.ytcfg;
+      const apiKey = ytcfg?.get?.('INNERTUBE_API_KEY') || 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
+      const clientVersion = ytcfg?.get?.('INNERTUBE_CLIENT_VERSION') || '2.20241201.00.00';
+      const clientName = ytcfg?.get?.('INNERTUBE_CLIENT_NAME') || 'WEB';
+      const visitorData = ytcfg?.get?.('VISITOR_DATA') || '';
+
+      const response = await fetch(`https://www.youtube.com/youtubei/v1/player?key=${apiKey}&prettyPrint=false`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Youtube-Client-Name': String(clientName === 'WEB' ? 1 : clientName),
+          'X-Youtube-Client-Version': clientVersion,
+        },
+        credentials: 'include',
         body: JSON.stringify({
           videoId: videoId,
           context: {
             client: {
-              clientName: 'WEB',
-              clientVersion: '2.20240101.00.00',
+              clientName: typeof clientName === 'string' ? clientName : 'WEB',
+              clientVersion: clientVersion,
               hl: 'en',
-              gl: 'US'
+              gl: 'US',
+              visitorData: visitorData,
+            }
+          },
+          playbackContext: {
+            contentPlaybackContext: {
+              signatureTimestamp: ytcfg?.get?.('STS') || undefined
             }
           }
         })
@@ -452,19 +470,70 @@ async function mainWorldExtractTranscript(videoId) {
 
       const data = await response.json();
       captionTracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-    } catch {
+    } catch (e) {
       // Fall through to method 2
     }
 
-    // Method 2: Parse video page HTML
+    // Method 2: Check if ytInitialPlayerResponse is available on the page
     if (!captionTracks || captionTracks.length === 0) {
       try {
-        const pageResp = await fetch(`https://www.youtube.com/watch?v=${videoId}`);
+        if (window.ytInitialPlayerResponse) {
+          captionTracks = window.ytInitialPlayerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+        }
+      } catch {
+        // Not available
+      }
+    }
+
+    // Method 3: Fetch the video page HTML and parse ytInitialPlayerResponse
+    if (!captionTracks || captionTracks.length === 0) {
+      try {
+        const pageResp = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+          credentials: 'include'
+        });
         const html = await pageResp.text();
-        const match = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
-        if (match) {
-          const playerResp = JSON.parse(match[1]);
-          captionTracks = playerResp?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+
+        // Try multiple regex patterns for ytInitialPlayerResponse
+        let playerData = null;
+        const patterns = [
+          /var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;/s,
+          /ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;/s,
+          /"captions"\s*:\s*(\{.+?"captionTracks".+?\})/s,
+        ];
+
+        for (const pattern of patterns) {
+          const match = html.match(pattern);
+          if (match) {
+            try {
+              playerData = JSON.parse(match[1]);
+              break;
+            } catch {
+              // Try fixing truncated JSON - find the matching closing brace
+              try {
+                const jsonStr = match[1];
+                // Find balanced braces
+                let depth = 0;
+                let endIdx = 0;
+                for (let i = 0; i < jsonStr.length; i++) {
+                  if (jsonStr[i] === '{') depth++;
+                  else if (jsonStr[i] === '}') {
+                    depth--;
+                    if (depth === 0) { endIdx = i + 1; break; }
+                  }
+                }
+                if (endIdx > 0) {
+                  playerData = JSON.parse(jsonStr.substring(0, endIdx));
+                }
+              } catch {
+                continue;
+              }
+            }
+          }
+        }
+
+        if (playerData) {
+          captionTracks = playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks
+            || playerData?.captionTracks;
         }
       } catch {
         // No captions available
@@ -477,18 +546,25 @@ async function mainWorldExtractTranscript(videoId) {
 
     // Select best caption track (matching Python tool's language priority)
     // 1. Manual English  2. Auto English  3. Translated to English  4. Any
-    function pickTrack(tracks) {
-      let t = tracks.find(t => t.languageCode?.startsWith('en') && t.kind !== 'asr');
-      if (t) return { track: t, method: 'english' };
-      t = tracks.find(t => t.languageCode?.startsWith('en') && t.kind === 'asr');
-      if (t) return { track: t, method: 'english-auto' };
-      t = tracks.find(t => t.isTranslatable !== false);
-      if (t) return { track: t, method: 'translated', tlang: 'en' };
-      if (tracks.length > 0) return { track: tracks[0], method: 'original' };
-      return null;
+    let selected = null;
+    // 1. Manual English
+    let tr = captionTracks.find(t => t.languageCode && t.languageCode.startsWith('en') && t.kind !== 'asr');
+    if (tr) { selected = { track: tr, method: 'english' }; }
+    // 2. Auto-generated English
+    if (!selected) {
+      tr = captionTracks.find(t => t.languageCode && t.languageCode.startsWith('en'));
+      if (tr) { selected = { track: tr, method: 'english-auto' }; }
+    }
+    // 3. Any translated to English
+    if (!selected) {
+      tr = captionTracks.find(t => t.isTranslatable !== false);
+      if (tr) { selected = { track: tr, method: 'translated', tlang: 'en' }; }
+    }
+    // 4. Any available
+    if (!selected && captionTracks.length > 0) {
+      selected = { track: captionTracks[0], method: 'original' };
     }
 
-    const selected = pickTrack(captionTracks);
     if (!selected) {
       return { noTranscript: true };
     }
@@ -498,16 +574,16 @@ async function mainWorldExtractTranscript(videoId) {
 
     // Add translation language if needed
     if (tlang) {
-      const sep = baseUrl.includes('?') ? '&' : '?';
-      baseUrl += `${sep}tlang=${tlang}`;
+      baseUrl += (baseUrl.includes('?') ? '&' : '?') + 'tlang=' + tlang;
     }
 
-    // Fetch transcript in json3 format
-    const json3Url = baseUrl + (baseUrl.includes('?') ? '&' : '?') + 'fmt=json3';
+    // Fetch transcript — try json3 format first, then XML
     let segments = [];
 
+    // Try json3
     try {
-      const resp = await fetch(json3Url);
+      const json3Url = baseUrl + (baseUrl.includes('?') ? '&' : '?') + 'fmt=json3';
+      const resp = await fetch(json3Url, { credentials: 'include' });
       const data = await resp.json();
 
       if (data.events) {
@@ -525,28 +601,36 @@ async function mainWorldExtractTranscript(videoId) {
         }
       }
     } catch {
-      // Fallback: try XML format
-      try {
-        const xmlUrl = baseUrl + (baseUrl.includes('?') ? '&' : '?') + 'fmt=srv3';
-        const resp = await fetch(xmlUrl);
-        const xml = await resp.text();
+      // json3 failed
+    }
 
+    // Fallback: try default format (XML timedtext)
+    if (segments.length === 0) {
+      try {
+        const resp = await fetch(baseUrl, { credentials: 'include' });
+        const xml = await resp.text();
         const parser = new DOMParser();
         const doc = parser.parseFromString(xml, 'text/xml');
-        const textNodes = doc.querySelectorAll('text, p');
+
+        // Handle both <text> (legacy) and <p> (srv3) elements
+        const textNodes = doc.querySelectorAll('text, p, body text, body p');
 
         textNodes.forEach(node => {
           const text = node.textContent.trim();
           if (text) {
+            const startAttr = node.getAttribute('start') || node.getAttribute('t');
+            const durAttr = node.getAttribute('dur') || node.getAttribute('d');
+            // 't' and 'd' attributes are in milliseconds, 'start' and 'dur' in seconds
+            const isMs = node.hasAttribute('t') || node.hasAttribute('d');
             segments.push({
-              start: parseFloat(node.getAttribute('start') || node.getAttribute('t') || 0) / (node.getAttribute('t') ? 1000 : 1),
-              duration: parseFloat(node.getAttribute('dur') || node.getAttribute('d') || 0) / (node.getAttribute('d') ? 1000 : 1),
+              start: parseFloat(startAttr || 0) / (isMs ? 1000 : 1),
+              duration: parseFloat(durAttr || 0) / (isMs ? 1000 : 1),
               text: text
             });
           }
         });
       } catch {
-        return { noTranscript: true };
+        // XML also failed
       }
     }
 
@@ -558,13 +642,13 @@ async function mainWorldExtractTranscript(videoId) {
     let language = track.name?.simpleText || track.languageCode || 'Unknown';
     if (method === 'english') {
       const isAuto = track.kind === 'asr';
-      language = `English (${isAuto ? 'auto-generated' : 'manual'})`;
+      language = 'English (' + (isAuto ? 'auto-generated' : 'manual') + ')';
     } else if (method === 'english-auto') {
       language = 'English (auto-generated)';
     } else if (method === 'translated') {
-      language = `Translated from ${track.name?.simpleText || track.languageCode}`;
+      language = 'Translated from ' + (track.name?.simpleText || track.languageCode);
     } else if (method === 'original') {
-      language = `${track.name?.simpleText || track.languageCode} (no English available)`;
+      language = (track.name?.simpleText || track.languageCode) + ' (no English available)';
     }
 
     return { segments, language };
@@ -602,12 +686,8 @@ async function generateAndDownloadOutput() {
 
 async function generateSingleMarkdownOutput(results, sourceName) {
   const content = formatMarkdown(results, sourceName, state.mode);
-  const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
   const filename = sanitizeFilename(sourceName) + '.md';
-
-  await chrome.downloads.download({ url, filename, saveAs: true });
-  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  await downloadTextFile(content, filename, 'text/markdown');
 }
 
 async function generateSplitMarkdownOutput(results, sourceName, wordLimit) {
@@ -638,11 +718,7 @@ async function generateSplitMarkdownOutput(results, sourceName, wordLimit) {
   }
 
   if (files.length === 1) {
-    // Single file, no need for ZIP
-    const blob = new Blob([files[0].content], { type: 'text/markdown;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    await chrome.downloads.download({ url, filename: files[0].name, saveAs: true });
-    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    await downloadTextFile(files[0].content, files[0].name, 'text/markdown');
   } else {
     await downloadAsZip(files, `${sanitizeFilename(sourceName)}_transcripts.zip`);
   }
@@ -652,13 +728,9 @@ async function generateSRTOutput(results, sourceName) {
   const successResults = results.filter(r => r.status === 'success' && r.segments);
 
   if (successResults.length === 1) {
-    // Single SRT file
     const content = formatSRT(successResults[0].segments);
-    const blob = new Blob([content], { type: 'application/x-subrip;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
     const filename = sanitizeFilename(successResults[0].title || sourceName) + '.srt';
-    await chrome.downloads.download({ url, filename, saveAs: true });
-    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    await downloadTextFile(content, filename, 'application/x-subrip');
   } else {
     // Multiple SRT files in ZIP
     const files = successResults.map(r => ({
@@ -767,24 +839,7 @@ function pad2(n) {
 // ============================================================================
 
 async function downloadAsZip(files, zipFilename) {
-  // Try to use JSZip if available
-  try {
-    if (typeof JSZip !== 'undefined') {
-      const zip = new JSZip();
-      for (const file of files) {
-        zip.file(file.name, file.content);
-      }
-      const blob = await zip.generateAsync({ type: 'blob' });
-      const url = URL.createObjectURL(blob);
-      await chrome.downloads.download({ url, filename: zipFilename, saveAs: true });
-      setTimeout(() => URL.revokeObjectURL(url), 10000);
-      return;
-    }
-  } catch {
-    // Fall through to manual ZIP
-  }
-
-  // Minimal ZIP implementation for service worker context
+  // Minimal ZIP implementation for service worker context (no URL.createObjectURL)
   const encoder = new TextEncoder();
   const entries = [];
   let offset = 0;
@@ -873,10 +928,57 @@ async function downloadAsZip(files, zipFilename) {
 
   zipData.set(eocd, pos);
 
-  const blob = new Blob([zipData], { type: 'application/zip' });
-  const url = URL.createObjectURL(blob);
-  await chrome.downloads.download({ url, filename: zipFilename, saveAs: true });
-  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  // Convert to data URL (service workers don't have URL.createObjectURL)
+  await downloadBinaryFile(zipData, zipFilename, 'application/zip');
+}
+
+// ============================================================================
+// Download Helpers (service workers don't have URL.createObjectURL)
+// ============================================================================
+
+/**
+ * Download a text file using data URL.
+ */
+async function downloadTextFile(content, filename, mimeType) {
+  // Encode content as base64 data URL
+  const encoder = new TextEncoder();
+  const bytes = encoder.encode(content);
+  const base64 = uint8ToBase64(bytes);
+  const dataUrl = `data:${mimeType || 'text/plain'};base64,${base64}`;
+
+  await chrome.downloads.download({
+    url: dataUrl,
+    filename: filename,
+    saveAs: true
+  });
+}
+
+/**
+ * Download binary data using data URL.
+ */
+async function downloadBinaryFile(uint8Array, filename, mimeType) {
+  const base64 = uint8ToBase64(uint8Array);
+  const dataUrl = `data:${mimeType || 'application/octet-stream'};base64,${base64}`;
+
+  await chrome.downloads.download({
+    url: dataUrl,
+    filename: filename,
+    saveAs: true
+  });
+}
+
+/**
+ * Convert Uint8Array to base64 string (works in service worker).
+ */
+function uint8ToBase64(uint8Array) {
+  // Process in chunks to avoid call stack overflow on large files
+  const CHUNK_SIZE = 32768;
+  let result = '';
+  for (let i = 0; i < uint8Array.length; i += CHUNK_SIZE) {
+    const chunk = uint8Array.subarray(i, Math.min(i + CHUNK_SIZE, uint8Array.length));
+    result += String.fromCharCode.apply(null, chunk);
+  }
+  return btoa(result);
 }
 
 // Simple CRC32 implementation
