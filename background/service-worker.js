@@ -121,6 +121,9 @@ async function handleStart(config) {
     sourceName: ''
   };
 
+  // Clear any leftover saved state from a previous run to free quota before writing new progress.
+  await clearSavedState();
+
   try {
     // Step 1: Collect videos
     const videos = await collectVideos(config);
@@ -327,6 +330,10 @@ async function runBatchExtraction(videos, tabId, concurrency) {
 }
 
 async function workerLoop(queue, tabId) {
+  // Build a set of already-processed video IDs to prevent duplicates.
+  // Covers: resume runs, channel "Both" mode collecting the same video from Videos + Shorts tabs.
+  const processedIds = new Set(state.results.map(r => r.videoId));
+
   while (queue.length > 0 && !state.isCancelled) {
     // Handle pause
     while (state.isPaused && !state.isCancelled) {
@@ -337,6 +344,13 @@ async function workerLoop(queue, tabId) {
     const video = queue.shift();
     if (!video) break;
 
+    // Deduplication filter — skip videos already in results
+    if (processedIds.has(video.videoId)) {
+      state.progress.remaining = queue.length;
+      broadcastProgress();
+      continue;
+    }
+
     state.progress.currentVideo = video.title;
     safeBroadcast({ action: 'currentVideo', title: video.title });
 
@@ -344,16 +358,29 @@ async function workerLoop(queue, tabId) {
       const result = await extractTranscriptInMainWorld(tabId, video.videoId);
 
       if (result && result.segments && result.segments.length > 0) {
-        const fullText = result.segments.map(s => decodeHTMLEntities(s.text)).join(' ');
-        state.results.push({
-          videoId: video.videoId,
-          title: video.title,
-          transcript: fullText,
-          segments: result.segments,
-          language: result.language || 'Unknown',
-          status: 'success'
-        });
-        state.progress.success++;
+        const fullText = result.segments.map(s => decodeHTMLEntities(s.text)).join(' ').trim();
+        // Empty-transcript filter — segments exist but all text is blank/whitespace
+        if (fullText.length > 0) {
+          state.results.push({
+            videoId: video.videoId,
+            title: video.title,
+            transcript: fullText,
+            segments: result.segments,
+            language: result.language || 'Unknown',
+            status: 'success'
+          });
+          state.progress.success++;
+        } else {
+          state.results.push({
+            videoId: video.videoId,
+            title: video.title,
+            transcript: null,
+            segments: null,
+            language: null,
+            status: 'no_transcript'
+          });
+          state.progress.noTranscript++;
+        }
       } else if (result && result.noTranscript) {
         state.results.push({
           videoId: video.videoId,
@@ -388,6 +415,9 @@ async function workerLoop(queue, tabId) {
       });
       state.progress.failed++;
     }
+
+    // Mark as processed so concurrent workers skip this ID
+    processedIds.add(video.videoId);
 
     state.progress.remaining = queue.length;
     broadcastProgress();
@@ -998,35 +1028,53 @@ function crc32(data) {
 // ============================================================================
 
 async function saveProgress() {
-  // Strip non-serializable fields (segments can be large, keep them for SRT)
+  // Omit transcript — it's redundant with segments and saves significant quota space.
+  // It will be reconstructed from segments when loaded via loadSavedProgress().
   const saveResults = state.results.map(r => ({
     videoId: r.videoId,
     title: r.title,
-    transcript: r.transcript,
     segments: r.segments,
     language: r.language,
     status: r.status,
     error: r.error
   }));
 
-  await chrome.storage.local.set({
-    savedState: {
-      mode: state.mode,
-      sourceName: state.sourceName,
-      videos: state.videos,
-      results: saveResults,
-      progress: state.progress,
-      timestamp: Date.now()
-    }
-  });
+  try {
+    await chrome.storage.local.set({
+      savedState: {
+        mode: state.mode,
+        sourceName: state.sourceName,
+        videos: state.videos,
+        results: saveResults,
+        progress: state.progress,
+        timestamp: Date.now()
+      }
+    });
+  } catch (err) {
+    // QuotaBytes exceeded or other storage error — warn but do not abort the extraction.
+    // All data is still in memory and the run can complete normally.
+    console.warn('[saveProgress] Storage write failed:', err.message);
+  }
 }
 
 async function loadSavedProgress() {
   const { savedState } = await chrome.storage.local.get('savedState');
-  if (savedState && (Date.now() - savedState.timestamp) < 86400000) {
-    return savedState;
+  if (!savedState || (Date.now() - savedState.timestamp) >= 86400000) {
+    return null;
   }
-  return null;
+
+  // Reconstruct transcript from segments for any result that lacks it.
+  // New saves omit transcript to save quota; old saves that already have it pass through unchanged.
+  if (Array.isArray(savedState.results)) {
+    savedState.results = savedState.results.map(r => {
+      if (r.status === 'success' && r.segments && !r.transcript) {
+        return { ...r, transcript: r.segments.map(s => decodeHTMLEntities(s.text)).join(' ') };
+      }
+      return r;
+    });
+  }
+
+  return savedState;
 }
 
 async function checkSaved() {
@@ -1039,6 +1087,14 @@ async function checkSaved() {
     };
   }
   return { hasSaved: false };
+}
+
+async function clearSavedState() {
+  try {
+    await chrome.storage.local.remove('savedState');
+  } catch (err) {
+    console.warn('[clearSavedState] Failed to remove saved state:', err.message);
+  }
 }
 
 // ============================================================================
