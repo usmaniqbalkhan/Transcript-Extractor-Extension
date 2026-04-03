@@ -20,6 +20,7 @@ const els = {
   concurrencyValue: document.getElementById('concurrencyValue'),
   startBtn: document.getElementById('startBtn'),
   resumeBtn: document.getElementById('resumeBtn'),
+  clearHistoryBtn: document.getElementById('clearHistoryBtn'),
   progressSection: document.getElementById('progressSection'),
   progressBar: document.getElementById('progressBar'),
   progressPercent: document.getElementById('progressPercent'),
@@ -172,6 +173,14 @@ els.startBtn.addEventListener('click', startExtraction);
 // Resume button
 els.resumeBtn.addEventListener('click', resumeExtraction);
 
+// Clear history button
+els.clearHistoryBtn.addEventListener('click', () => {
+  chrome.runtime.sendMessage({ action: 'clearSavedProgress' }, () => {
+    els.resumeBtn.classList.add('hidden');
+    els.clearHistoryBtn.classList.add('hidden');
+  });
+});
+
 // Pause button
 els.pauseBtn.addEventListener('click', () => {
   const isPaused = els.pauseBtn.textContent === 'Pause';
@@ -199,11 +208,13 @@ els.downloadBtn.addEventListener('click', () => {
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message.action === 'progressUpdate') {
+    els.pauseBtn.disabled = false; // Enable pause once fetching phase starts
     updateProgress(message.progress);
   } else if (message.action === 'extractionComplete') {
     showResults(message);
   } else if (message.action === 'extractionError') {
     showError(message.error);
+    hideProgressUI();
   } else if (message.action === 'collectionProgress') {
     els.currentVideoStatus.textContent = `Collecting videos... (${message.collected} found)`;
   } else if (message.action === 'currentVideo') {
@@ -378,6 +389,7 @@ async function checkSavedProgress() {
       if (response && response.hasSaved) {
         els.resumeBtn.classList.remove('hidden');
         els.resumeBtn.textContent = `Resume (${response.completed}/${response.total} done)`;
+        els.clearHistoryBtn.classList.remove('hidden');
       }
     });
   } catch {
@@ -394,11 +406,13 @@ function showProgressUI() {
   els.resultsSection.classList.add('hidden');
   els.startBtn.disabled = true;
   els.pauseBtn.textContent = 'Pause';
+  els.pauseBtn.disabled = true; // Disabled during collection phase, enabled when fetching starts
   els.cancelBtn.disabled = false;
   els.cancelBtn.textContent = 'Cancel';
 }
 
 function hideProgressUI() {
+  els.progressSection.classList.add('hidden');
   els.startBtn.disabled = false;
   els.startBtn.textContent = 'Download Transcripts';
 }
@@ -427,6 +441,7 @@ function showResults(data) {
   els.startBtn.disabled = false;
   els.startBtn.textContent = 'Download Transcripts';
   els.resumeBtn.classList.add('hidden');
+  els.clearHistoryBtn.classList.add('hidden');
 
   const p = data.progress || {};
   els.resultsSummary.innerHTML = `
