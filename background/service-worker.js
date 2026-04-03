@@ -73,6 +73,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'cancelExtraction':
       state.isCancelled = true;
       state.isPaused = false;
+      // If currently in collection phase, tell the content script to stop scrolling
+      if (state.phase === 'collecting' && state.tabId) {
+        safeSendToTab(state.tabId, { action: 'cancelScan' });
+      }
       sendResponse({ success: true });
       return false;
 
@@ -131,6 +135,13 @@ async function handleStart(config) {
       throw new Error('No videos found');
     }
 
+    // Check if cancelled during collection
+    if (state.isCancelled) {
+      state.phase = 'idle';
+      safeBroadcast({ action: 'extractionError', error: 'Extraction cancelled' });
+      return { success: true };
+    }
+
     state.videos = videos;
     state.progress.total = videos.length;
     state.progress.remaining = videos.length;
@@ -140,6 +151,14 @@ async function handleStart(config) {
 
     // Step 2: Extract transcripts
     await runBatchExtraction(videos, config.tabId, state.concurrency);
+
+    // Check if cancelled during extraction
+    if (state.isCancelled) {
+      await saveProgress();
+      state.phase = 'idle';
+      safeBroadcast({ action: 'extractionError', error: 'Extraction cancelled' });
+      return { success: true };
+    }
 
     // Save progress
     await saveProgress();
