@@ -260,6 +260,11 @@ async function collectVideos(config) {
   await ensureContentScriptInjected(tabId);
 
   if (mode === 'playlist') {
+    // Navigate the tab to the playlist URL if needed.
+    // This handles the case where the user picked a playlist from the channel's
+    // playlists tab — the tab is still on the channel page, not the playlist.
+    await navigateTabToUrl(tabId, url);
+    await ensureContentScriptInjected(tabId);
     const response = await safeSendToTab(tabId, { action: 'collectPlaylistVideos' });
     if (!response || !response.success) throw new Error(response?.error || 'Failed to collect playlist videos');
     state.sourceName = sanitizeFilename(await getPlaylistTitle(tabId) || 'playlist');
@@ -312,6 +317,46 @@ async function ensureContentScriptInjected(tabId) {
   } catch (err) {
     throw new Error('Could not connect to YouTube tab. Please refresh the page and try again.');
   }
+}
+
+/**
+ * Navigate a tab to a URL only if it is not already on that page.
+ * Used to send the tab to the correct playlist before collecting videos.
+ */
+async function navigateTabToUrl(tabId, url) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    const currentUrl = tab.url || '';
+    // Extract the playlist ID from both URLs; skip navigation if already on the same playlist
+    const targetListId = url.match(/[?&]list=([a-zA-Z0-9_-]+)/)?.[1];
+    if (targetListId && currentUrl.includes(targetListId)) return; // Already on correct page
+    // Navigate the tab
+    await chrome.tabs.update(tabId, { url });
+    await waitForTabLoad(tabId);
+    await sleep(1500); // Extra wait for YouTube SPA to render initial content
+  } catch {
+    // Tab may be gone or navigation unsupported — proceed anyway
+  }
+}
+
+/**
+ * Wait for a tab to finish loading (status === 'complete'), with a 10s timeout.
+ */
+function waitForTabLoad(tabId) {
+  return new Promise(resolve => {
+    const listener = (id, changeInfo) => {
+      if (id === tabId && changeInfo.status === 'complete') {
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve();
+      }
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+    // Safety timeout
+    setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve();
+    }, 10000);
+  });
 }
 
 /**
