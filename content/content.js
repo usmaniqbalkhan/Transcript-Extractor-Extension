@@ -51,6 +51,7 @@ if (!window.__ytTranscriptExtractorLoaded) {
       if (url.includes('/videos')) currentTab = 'videos';
       else if (url.includes('/shorts')) currentTab = 'shorts';
       else if (url.includes('/streams')) currentTab = 'streams';
+      else if (url.includes('/playlists')) currentTab = 'playlists';
       return { type: 'channel', channelName: channelName.trim(), channelPath: channelMatch[1], currentTab };
     }
 
@@ -209,6 +210,84 @@ if (!window.__ytTranscriptExtractorLoaded) {
   }
 
   // ============================================================================
+  // Playlist Collection - Channel Playlists Tab
+  // ============================================================================
+
+  async function collectChannelPlaylists(sendProgress) {
+    cancelFlag = false;
+
+    // Navigate to the /playlists tab if not already there
+    const currentUrl = window.location.href;
+    if (!currentUrl.includes('/playlists')) {
+      const baseUrl = currentUrl.replace(/\/(videos|shorts|streams|playlists|community|channels|about|featured)\/?.*$/, '');
+      window.location.href = baseUrl + '/playlists';
+      await waitForNavigation();
+      await sleep(2000);
+    }
+
+    const playlists = [];
+    const seenIds = new Set();
+
+    // Wait for playlist cards to load
+    await waitForElement('ytd-grid-playlist-renderer, ytd-rich-item-renderer');
+
+    let emptyScrollCount = 0;
+    const MAX_EMPTY_SCROLLS = 5;
+    const MAX_SCROLLS = 100;
+
+    for (let scroll = 0; scroll < MAX_SCROLLS; scroll++) {
+      if (cancelFlag) break;
+
+      // ytd-grid-playlist-renderer is the primary renderer on the /playlists tab
+      const renderers = document.querySelectorAll('ytd-grid-playlist-renderer');
+      let newCount = 0;
+
+      renderers.forEach(renderer => {
+        // Extract playlist ID from thumbnail or title link
+        const link = renderer.querySelector('a#thumbnail, a#video-title-link, a[href*="list="]');
+        if (!link) return;
+        const href = link.getAttribute('href') || '';
+        const listMatch = href.match(/list=([a-zA-Z0-9_-]+)/);
+        if (!listMatch) return;
+        const playlistId = listMatch[1];
+        if (seenIds.has(playlistId)) return;
+        seenIds.add(playlistId);
+
+        // Extract title
+        const titleEl = renderer.querySelector('yt-formatted-string#video-title, #video-title, h3 a, a#video-title-link');
+        const title = titleEl?.textContent?.trim() || 'Untitled Playlist';
+
+        // Extract video count from side panel overlay
+        const countEl = renderer.querySelector(
+          'ytd-thumbnail-overlay-side-panel-renderer span, ' +
+          '.ytd-thumbnail-overlay-side-panel-renderer, ' +
+          'p.ytd-thumbnail-overlay-side-panel-renderer'
+        );
+        const videoCount = countEl?.textContent?.trim() || '';
+
+        newCount++;
+        playlists.push({ playlistId, title, videoCount });
+      });
+
+      if (sendProgress) {
+        sendProgress({ collected: playlists.length });
+      }
+
+      if (newCount === 0) {
+        emptyScrollCount++;
+        if (emptyScrollCount >= MAX_EMPTY_SCROLLS) break;
+      } else {
+        emptyScrollCount = 0;
+      }
+
+      window.scrollTo(0, document.documentElement.scrollHeight);
+      await sleep(1500);
+    }
+
+    return playlists;
+  }
+
+  // ============================================================================
   // Utility Functions
   // ============================================================================
 
@@ -285,6 +364,17 @@ if (!window.__ytTranscriptExtractorLoaded) {
         try { chrome.runtime.sendMessage({ action: 'collectionProgress', ...progress }, () => { if (chrome.runtime.lastError) {} }); } catch {}
       }).then(videos => {
         sendResponse({ success: true, videos });
+      }).catch(err => {
+        sendResponse({ success: false, error: err.message });
+      });
+      return true; // async
+    }
+
+    if (action === 'collectChannelPlaylists') {
+      collectChannelPlaylists((progress) => {
+        try { chrome.runtime.sendMessage({ action: 'playlistsCollectionProgress', ...progress }, () => { if (chrome.runtime.lastError) {} }); } catch {}
+      }).then(playlists => {
+        sendResponse({ success: true, playlists });
       }).catch(err => {
         sendResponse({ success: false, error: err.message });
       });

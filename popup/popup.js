@@ -8,6 +8,11 @@
 // ============================================================================
 
 const els = {
+  signInBtn: document.getElementById('signInBtn'),
+  authInfo: document.getElementById('authInfo'),
+  authEmail: document.getElementById('authEmail'),
+  signOutBtn: document.getElementById('signOutBtn'),
+  authError: document.getElementById('authError'),
   pageStatusIcon: document.getElementById('pageStatusIcon'),
   pageStatusText: document.getElementById('pageStatusText'),
   channelOptions: document.getElementById('channelOptions'),
@@ -21,6 +26,9 @@ const els = {
   startBtn: document.getElementById('startBtn'),
   resumeBtn: document.getElementById('resumeBtn'),
   clearHistoryBtn: document.getElementById('clearHistoryBtn'),
+  playlistPickerSection: document.getElementById('playlistPickerSection'),
+  loadPlaylistsBtn: document.getElementById('loadPlaylistsBtn'),
+  playlistList: document.getElementById('playlistList'),
   progressSection: document.getElementById('progressSection'),
   progressBar: document.getElementById('progressBar'),
   progressPercent: document.getElementById('progressPercent'),
@@ -125,6 +133,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Setup keep-alive
   setupKeepAlive();
+
+  // Check if user is already signed in (non-interactive)
+  checkExistingAuth();
 });
 
 // ============================================================================
@@ -135,6 +146,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 document.querySelectorAll('input[name="mode"]').forEach(radio => {
   radio.addEventListener('change', (e) => {
     els.channelOptions.classList.toggle('hidden', e.target.value !== 'channel');
+    // Hide playlist picker on manual mode change (it's auto-shown for channel playlists tab)
+    els.playlistPickerSection.classList.add('hidden');
   });
 });
 
@@ -179,6 +192,38 @@ els.clearHistoryBtn.addEventListener('click', () => {
     els.resumeBtn.classList.add('hidden');
     els.clearHistoryBtn.classList.add('hidden');
   });
+});
+
+// Sign in button
+els.signInBtn.addEventListener('click', handleSignIn);
+
+// Sign out button
+els.signOutBtn.addEventListener('click', handleSignOut);
+
+// Load playlists button
+els.loadPlaylistsBtn.addEventListener('click', async () => {
+  els.loadPlaylistsBtn.disabled = true;
+  els.loadPlaylistsBtn.textContent = 'Loading...';
+  els.playlistList.classList.add('hidden');
+  hideError();
+
+  try {
+    const response = await sendToContentScript(currentTabId, { action: 'collectChannelPlaylists' });
+    if (!response || !response.success) {
+      showError(response?.error || 'Could not load playlists. Make sure you are on a channel\'s Playlists tab.');
+      return;
+    }
+    if (!response.playlists || response.playlists.length === 0) {
+      showError('No playlists found on this page.');
+      return;
+    }
+    renderPlaylistList(response.playlists);
+  } catch (err) {
+    showError('Could not load playlists: ' + err.message);
+  } finally {
+    els.loadPlaylistsBtn.disabled = false;
+    els.loadPlaylistsBtn.textContent = 'Load Playlists';
+  }
 });
 
 // Pause button
@@ -256,8 +301,15 @@ async function detectPageState(tab) {
         break;
       case 'channel':
         els.pageStatusIcon.textContent = '📺';
-        els.pageStatusText.textContent = `Channel: ${response.channelName}`;
-        setMode('channel');
+        if (response.currentTab === 'playlists') {
+          els.pageStatusText.textContent = `Channel Playlists: ${response.channelName}`;
+          setMode('playlist');
+          els.playlistPickerSection.classList.remove('hidden');
+        } else {
+          els.pageStatusText.textContent = `Channel: ${response.channelName}`;
+          setMode('channel');
+          els.playlistPickerSection.classList.add('hidden');
+        }
         break;
       default:
         els.pageStatusIcon.textContent = '🔗';
@@ -278,6 +330,11 @@ function detectFromURL(url) {
     els.pageStatusIcon.textContent = '📋';
     els.pageStatusText.textContent = 'Playlist detected from URL';
     setMode('playlist');
+  } else if (/youtube\.com\/(@|channel\/|c\/|user\/).*\/playlists/.test(url)) {
+    els.pageStatusIcon.textContent = '📺';
+    els.pageStatusText.textContent = 'Channel Playlists detected from URL';
+    setMode('playlist');
+    els.playlistPickerSection.classList.remove('hidden');
   } else if (/youtube\.com\/(@|channel\/|c\/|user\/)/.test(url)) {
     els.pageStatusIcon.textContent = '📺';
     els.pageStatusText.textContent = 'Channel detected from URL';
@@ -291,6 +348,29 @@ function detectFromURL(url) {
 function setMode(mode) {
   document.querySelector(`input[name="mode"][value="${mode}"]`).checked = true;
   els.channelOptions.classList.toggle('hidden', mode !== 'channel');
+  // Hide playlist picker when manually switching modes (it's shown programmatically for channel/playlists tab)
+}
+
+function renderPlaylistList(playlists) {
+  els.playlistList.innerHTML = '';
+  playlists.forEach(p => {
+    const item = document.createElement('div');
+    item.className = 'playlist-item';
+    item.innerHTML = `
+      <div class="playlist-item-title">${p.title.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
+      ${p.videoCount ? `<div class="playlist-item-count">${p.videoCount} videos</div>` : ''}
+    `;
+    item.addEventListener('click', () => {
+      // Deselect all, select this one
+      els.playlistList.querySelectorAll('.playlist-item').forEach(el => el.classList.remove('selected'));
+      item.classList.add('selected');
+      // Update URL input with this playlist URL
+      els.urlInput.value = `https://www.youtube.com/playlist?list=${p.playlistId}`;
+      els.pageStatusText.textContent = `Playlist: ${p.title.substring(0, 30)}`;
+    });
+    els.playlistList.appendChild(item);
+  });
+  els.playlistList.classList.remove('hidden');
 }
 
 function getConfig() {
@@ -404,6 +484,7 @@ async function checkSavedProgress() {
 function showProgressUI() {
   els.progressSection.classList.remove('hidden');
   els.resultsSection.classList.add('hidden');
+  els.playlistPickerSection.classList.add('hidden');
   els.startBtn.disabled = true;
   els.pauseBtn.textContent = 'Pause';
   els.pauseBtn.disabled = true; // Disabled during collection phase, enabled when fetching starts
@@ -459,6 +540,105 @@ function showError(msg) {
 
 function hideError() {
   els.errorSection.classList.add('hidden');
+}
+
+// ============================================================================
+// Google Sign-In
+// ============================================================================
+
+function checkExistingAuth() {
+  // Non-interactive check — see if user already has a token cached
+  chrome.identity.getAuthToken({ interactive: false }, (token) => {
+    if (chrome.runtime.lastError || !token) {
+      console.log('[Auth] No cached token found.');
+      return;
+    }
+    console.log('[Auth] Found cached token, fetching profile...');
+    fetchAndShowProfile();
+  });
+}
+
+async function handleSignIn() {
+  els.signInBtn.disabled = true;
+  els.signInBtn.textContent = 'Signing in...';
+  els.authError.classList.add('hidden');
+
+  chrome.identity.getAuthToken({ interactive: true }, (token) => {
+    if (chrome.runtime.lastError) {
+      const errMsg = chrome.runtime.lastError.message || 'Sign-in failed';
+      console.error('[Auth] getAuthToken error:', errMsg);
+      showAuthError(errMsg);
+      els.signInBtn.disabled = false;
+      els.signInBtn.textContent = 'Sign in with Google';
+      return;
+    }
+    if (!token) {
+      showAuthError('No token received. Sign-in may have been cancelled.');
+      els.signInBtn.disabled = false;
+      els.signInBtn.textContent = 'Sign in with Google';
+      return;
+    }
+    console.log('[Auth] Token obtained successfully.');
+    fetchAndShowProfile();
+  });
+}
+
+function fetchAndShowProfile() {
+  chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }, (userInfo) => {
+    if (chrome.runtime.lastError) {
+      console.warn('[Auth] getProfileUserInfo error:', chrome.runtime.lastError.message);
+      showAuthError('Could not retrieve user info.');
+      els.signInBtn.disabled = false;
+      els.signInBtn.textContent = 'Sign in with Google';
+      return;
+    }
+    if (userInfo && userInfo.email) {
+      console.log('[Auth] Signed in as:', userInfo.email);
+      els.signInBtn.classList.add('hidden');
+      els.authInfo.classList.remove('hidden');
+      els.authEmail.textContent = userInfo.email;
+      els.authError.classList.add('hidden');
+    } else {
+      console.warn('[Auth] getProfileUserInfo returned no email.', userInfo);
+      showAuthError('Signed in but email not available. Check extension permissions.');
+      els.signInBtn.disabled = false;
+      els.signInBtn.textContent = 'Sign in with Google';
+    }
+  });
+}
+
+function handleSignOut() {
+  chrome.identity.getAuthToken({ interactive: false }, (token) => {
+    if (chrome.runtime.lastError || !token) {
+      resetAuthUI();
+      return;
+    }
+    // Revoke the token, then clear it from Chrome's cache
+    chrome.identity.removeCachedAuthToken({ token }, () => {
+      console.log('[Auth] Token removed from cache.');
+      // Also revoke remotely so re-sign-in shows account picker
+      fetch(`https://accounts.google.com/o/oauth2/revoke?token=${token}`)
+        .catch(() => {}) // Best effort
+        .finally(() => {
+          resetAuthUI();
+        });
+    });
+  });
+}
+
+function resetAuthUI() {
+  els.signInBtn.classList.remove('hidden');
+  els.signInBtn.disabled = false;
+  els.signInBtn.textContent = 'Sign in with Google';
+  els.authInfo.classList.add('hidden');
+  els.authEmail.textContent = '';
+  els.authError.classList.add('hidden');
+  console.log('[Auth] Signed out.');
+}
+
+function showAuthError(msg) {
+  els.authError.textContent = msg;
+  els.authError.classList.remove('hidden');
 }
 
 // ============================================================================
