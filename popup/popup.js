@@ -8,6 +8,11 @@
 // ============================================================================
 
 const els = {
+  signInBtn: document.getElementById('signInBtn'),
+  authInfo: document.getElementById('authInfo'),
+  authEmail: document.getElementById('authEmail'),
+  signOutBtn: document.getElementById('signOutBtn'),
+  authError: document.getElementById('authError'),
   pageStatusIcon: document.getElementById('pageStatusIcon'),
   pageStatusText: document.getElementById('pageStatusText'),
   channelOptions: document.getElementById('channelOptions'),
@@ -128,6 +133,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Setup keep-alive
   setupKeepAlive();
+
+  // Check if user is already signed in (non-interactive)
+  checkExistingAuth();
 });
 
 // ============================================================================
@@ -185,6 +193,12 @@ els.clearHistoryBtn.addEventListener('click', () => {
     els.clearHistoryBtn.classList.add('hidden');
   });
 });
+
+// Sign in button
+els.signInBtn.addEventListener('click', handleSignIn);
+
+// Sign out button
+els.signOutBtn.addEventListener('click', handleSignOut);
 
 // Load playlists button
 els.loadPlaylistsBtn.addEventListener('click', async () => {
@@ -526,6 +540,105 @@ function showError(msg) {
 
 function hideError() {
   els.errorSection.classList.add('hidden');
+}
+
+// ============================================================================
+// Google Sign-In
+// ============================================================================
+
+function checkExistingAuth() {
+  // Non-interactive check — see if user already has a token cached
+  chrome.identity.getAuthToken({ interactive: false }, (token) => {
+    if (chrome.runtime.lastError || !token) {
+      console.log('[Auth] No cached token found.');
+      return;
+    }
+    console.log('[Auth] Found cached token, fetching profile...');
+    fetchAndShowProfile();
+  });
+}
+
+async function handleSignIn() {
+  els.signInBtn.disabled = true;
+  els.signInBtn.textContent = 'Signing in...';
+  els.authError.classList.add('hidden');
+
+  chrome.identity.getAuthToken({ interactive: true }, (token) => {
+    if (chrome.runtime.lastError) {
+      const errMsg = chrome.runtime.lastError.message || 'Sign-in failed';
+      console.error('[Auth] getAuthToken error:', errMsg);
+      showAuthError(errMsg);
+      els.signInBtn.disabled = false;
+      els.signInBtn.textContent = 'Sign in with Google';
+      return;
+    }
+    if (!token) {
+      showAuthError('No token received. Sign-in may have been cancelled.');
+      els.signInBtn.disabled = false;
+      els.signInBtn.textContent = 'Sign in with Google';
+      return;
+    }
+    console.log('[Auth] Token obtained successfully.');
+    fetchAndShowProfile();
+  });
+}
+
+function fetchAndShowProfile() {
+  chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }, (userInfo) => {
+    if (chrome.runtime.lastError) {
+      console.warn('[Auth] getProfileUserInfo error:', chrome.runtime.lastError.message);
+      showAuthError('Could not retrieve user info.');
+      els.signInBtn.disabled = false;
+      els.signInBtn.textContent = 'Sign in with Google';
+      return;
+    }
+    if (userInfo && userInfo.email) {
+      console.log('[Auth] Signed in as:', userInfo.email);
+      els.signInBtn.classList.add('hidden');
+      els.authInfo.classList.remove('hidden');
+      els.authEmail.textContent = userInfo.email;
+      els.authError.classList.add('hidden');
+    } else {
+      console.warn('[Auth] getProfileUserInfo returned no email.', userInfo);
+      showAuthError('Signed in but email not available. Check extension permissions.');
+      els.signInBtn.disabled = false;
+      els.signInBtn.textContent = 'Sign in with Google';
+    }
+  });
+}
+
+function handleSignOut() {
+  chrome.identity.getAuthToken({ interactive: false }, (token) => {
+    if (chrome.runtime.lastError || !token) {
+      resetAuthUI();
+      return;
+    }
+    // Revoke the token, then clear it from Chrome's cache
+    chrome.identity.removeCachedAuthToken({ token }, () => {
+      console.log('[Auth] Token removed from cache.');
+      // Also revoke remotely so re-sign-in shows account picker
+      fetch(`https://accounts.google.com/o/oauth2/revoke?token=${token}`)
+        .catch(() => {}) // Best effort
+        .finally(() => {
+          resetAuthUI();
+        });
+    });
+  });
+}
+
+function resetAuthUI() {
+  els.signInBtn.classList.remove('hidden');
+  els.signInBtn.disabled = false;
+  els.signInBtn.textContent = 'Sign in with Google';
+  els.authInfo.classList.add('hidden');
+  els.authEmail.textContent = '';
+  els.authError.classList.add('hidden');
+  console.log('[Auth] Signed out.');
+}
+
+function showAuthError(msg) {
+  els.authError.textContent = msg;
+  els.authError.classList.remove('hidden');
 }
 
 // ============================================================================
