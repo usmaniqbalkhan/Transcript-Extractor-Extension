@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YT Transcript Extractor — Sign In</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      width: 380px;
+      min-height: 280px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 32px 24px;
+    }
+
+    .lock-icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+    }
+
+    h1 {
+      font-size: 18px;
+      font-weight: 700;
+      color: #fff;
+      margin-bottom: 6px;
+      text-align: center;
+    }
+
+    .subtitle {
+      font-size: 12px;
+      color: rgba(255, 255, 255, 0.55);
+      margin-bottom: 28px;
+      text-align: center;
+    }
+
+    .sign-in-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      width: 100%;
+      max-width: 260px;
+      padding: 11px 20px;
+      border-radius: 8px;
+      border: none;
+      background: linear-gradient(135deg, #4285f4, #356ac3);
+      color: #fff;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+
+    .sign-in-btn:hover {
+      opacity: 0.9;
+    }
+
+    .sign-in-btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    .sign-in-btn .g-logo {
+      width: 18px;
+      height: 18px;
+      background: #fff;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: 700;
+      color: #4285f4;
+      flex-shrink: 0;
+    }
+
+    .status-area {
+      margin-top: 18px;
+      text-align: center;
+      min-height: 20px;
+    }
+
+    .status-text {
+      font-size: 12px;
+      color: #9e9e9e;
+    }
+
+    .error-text {
+      font-size: 12px;
+      color: #ef5350;
+    }
+
+    .signed-in-area {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      width: 100%;
+      max-width: 260px;
+    }
+
+    .signed-in-area.visible {
+      display: flex;
+    }
+
+    .email-display {
+      font-size: 13px;
+      color: #8ab4f8;
+      text-align: center;
+      word-break: break-all;
+    }
+
+    .open-btn {
+      width: 100%;
+      padding: 11px 20px;
+      border-radius: 8px;
+      border: none;
+      background: linear-gradient(135deg, #e53935, #c62828);
+      color: #fff;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+
+    .open-btn:hover {
+      opacity: 0.9;
+    }
+
+    .sign-out-btn {
+      padding: 6px 14px;
+      border-radius: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: transparent;
+      color: #9e9e9e;
+      font-size: 11px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .sign-out-btn:hover {
+      background: rgba(255, 255, 255, 0.08);
+      color: #e0e0e0;
+    }
+  </style>
+</head>
+<body>
+  <div class="lock-icon">🔒</div>
+  <h1>YT Transcript Extractor</h1>
+  <p class="subtitle">Sign in with Google to use the extension</p>
+
+  <!-- Sign-in state -->
+  <button id="signInBtn" class="sign-in-btn">
+    <span class="g-logo">G</span>
+    <span>Sign in with Google</span>
+  </button>
+
+  <!-- Signed-in state -->
+  <div id="signedInArea" class="signed-in-area">
+    <div id="emailDisplay" class="email-display"></div>
+    <button id="openExtensionBtn" class="open-btn">Open Extension</button>
+    <button id="signOutBtn" class="sign-out-btn">Sign out</button>
+  </div>
+
+  <div class="status-area">
+    <div id="statusText" class="status-text"></div>
+    <div id="errorText" class="error-text"></div>
+  </div>
+
+  <script src="auth.js"></script>
+</body>
+</html>
