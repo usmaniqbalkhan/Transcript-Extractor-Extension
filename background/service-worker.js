@@ -565,7 +565,44 @@ async function mainWorldExtractTranscript(videoId) {
       const data = await response.json();
       captionTracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
     } catch (e) {
-      // Fall through to method 2
+      // Fall through to method 1b
+    }
+
+    // Method 1b: Use WEB_EMBEDDED_PLAYER client — bypasses poToken requirement
+    if (!captionTracks || captionTracks.length === 0) {
+      try {
+        const ytcfg = window.ytcfg;
+        const apiKey = ytcfg?.get?.('INNERTUBE_API_KEY') || 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
+
+        const response = await fetch(`https://www.youtube.com/youtubei/v1/player?key=${apiKey}&prettyPrint=false`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Youtube-Client-Name': '56',
+            'X-Youtube-Client-Version': '2.0',
+          },
+          credentials: 'include',
+          body: JSON.stringify({
+            videoId: videoId,
+            context: {
+              client: {
+                clientName: 'WEB_EMBEDDED_PLAYER',
+                clientVersion: '2.0',
+                hl: 'en',
+                gl: 'US',
+              },
+              thirdParty: {
+                embedUrl: 'https://www.youtube.com/'
+              }
+            }
+          })
+        });
+
+        const data = await response.json();
+        captionTracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+      } catch {
+        // Fall through to method 2
+      }
     }
 
     // Method 2: Check if ytInitialPlayerResponse is available on the page
@@ -582,8 +619,12 @@ async function mainWorldExtractTranscript(videoId) {
     // Method 3: Fetch the video page HTML and parse ytInitialPlayerResponse
     if (!captionTracks || captionTracks.length === 0) {
       try {
-        const pageResp = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
-          credentials: 'include'
+        const pageResp = await fetch(`https://www.youtube.com/watch?v=${videoId}&has_verified=1`, {
+          credentials: 'include',
+          headers: {
+            'Accept': 'text/html',
+            'Accept-Language': 'en-US,en;q=0.9',
+          }
         });
         const html = await pageResp.text();
 
