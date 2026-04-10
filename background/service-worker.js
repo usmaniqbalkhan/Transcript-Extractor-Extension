@@ -419,7 +419,13 @@ async function workerLoop(queue, tabId) {
     safeBroadcast({ action: 'currentVideo', title: video.title });
 
     try {
-      const result = await extractTranscriptInMainWorld(tabId, video.videoId);
+      // Try direct service-worker extraction first (bypasses page-level poToken restrictions)
+      let result = await extractTranscriptDirect(video.videoId);
+
+      // Fall back to MAIN world extraction if direct method failed
+      if (!result || !result.segments || result.segments.length === 0) {
+        result = await extractTranscriptInMainWorld(tabId, video.videoId);
+      }
 
       if (result && result.segments && result.segments.length > 0) {
         const fullText = result.segments.map(s => decodeHTMLEntities(s.text)).join(' ').trim();
@@ -497,7 +503,187 @@ async function workerLoop(queue, tabId) {
 }
 
 // ============================================================================
-// Transcript Extraction (Main World)
+// Transcript Extraction (Direct — service worker context)
+// ============================================================================
+// Fetches transcripts directly from the service worker, bypassing YouTube's
+// page-level poToken/bot-detection that blocks MAIN world API calls.
+
+async function extractTranscriptDirect(videoId) {
+  let captionTracks = null;
+
+  // Client configs to try in order
+  const clients = [
+    {
+      clientName: 'WEB',
+      clientVersion: '2.20250401.00.00',
+      clientId: '1',
+    },
+    {
+      clientName: 'WEB_EMBEDDED_PLAYER',
+      clientVersion: '2.0',
+      clientId: '56',
+      thirdParty: { embedUrl: 'https://www.youtube.com/' },
+    },
+  ];
+
+  for (const client of clients) {
+    if (captionTracks && captionTracks.length > 0) break;
+    try {
+      const body = {
+        videoId,
+        context: {
+          client: {
+            clientName: client.clientName,
+            clientVersion: client.clientVersion,
+            hl: 'en',
+            gl: 'US',
+          }
+        }
+      };
+      if (client.thirdParty) {
+        body.context.thirdParty = client.thirdParty;
+      }
+
+      const resp = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Youtube-Client-Name': client.clientId,
+          'X-Youtube-Client-Version': client.clientVersion,
+        },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json();
+      captionTracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+    } catch {
+      // Try next client
+    }
+  }
+
+  // Fallback: scrape the video watch page HTML
+  if (!captionTracks || captionTracks.length === 0) {
+    try {
+      const pageResp = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+        headers: {
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+      });
+      const html = await pageResp.text();
+
+      const patterns = [
+        /var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;\s*(?:var|<\/script>)/s,
+        /ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;/s,
+      ];
+
+      for (const pattern of patterns) {
+        const match = html.match(pattern);
+        if (!match) continue;
+        try {
+          // Find balanced braces for proper JSON extraction
+          const jsonStr = match[1];
+          let depth = 0, endIdx = 0;
+          for (let i = 0; i < jsonStr.length; i++) {
+            if (jsonStr[i] === '{') depth++;
+            else if (jsonStr[i] === '}') { depth--; if (depth === 0) { endIdx = i + 1; break; } }
+          }
+          if (endIdx > 0) {
+            const playerData = JSON.parse(jsonStr.substring(0, endIdx));
+            captionTracks = playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+            if (captionTracks && captionTracks.length > 0) break;
+          }
+        } catch { continue; }
+      }
+    } catch {
+      // Page fetch failed
+    }
+  }
+
+  if (!captionTracks || captionTracks.length === 0) {
+    return { noTranscript: true };
+  }
+
+  // Select best caption track (priority: manual English > auto English > translated > any)
+  let selected = null;
+  let tr = captionTracks.find(t => t.languageCode?.startsWith('en') && t.kind !== 'asr');
+  if (tr) { selected = { track: tr, method: 'english' }; }
+  if (!selected) {
+    tr = captionTracks.find(t => t.languageCode?.startsWith('en'));
+    if (tr) { selected = { track: tr, method: 'english-auto' }; }
+  }
+  if (!selected) {
+    tr = captionTracks.find(t => t.isTranslatable !== false);
+    if (tr) { selected = { track: tr, method: 'translated', tlang: 'en' }; }
+  }
+  if (!selected && captionTracks.length > 0) {
+    selected = { track: captionTracks[0], method: 'original' };
+  }
+  if (!selected) return { noTranscript: true };
+
+  const { track, method, tlang } = selected;
+  let baseUrl = track.baseUrl;
+  if (tlang) baseUrl += (baseUrl.includes('?') ? '&' : '?') + 'tlang=' + tlang;
+
+  // Fetch transcript — json3 format (works in service worker without DOMParser)
+  let segments = [];
+  try {
+    const json3Url = baseUrl + (baseUrl.includes('?') ? '&' : '?') + 'fmt=json3';
+    const resp = await fetch(json3Url);
+    const data = await resp.json();
+    if (data.events) {
+      for (const event of data.events) {
+        if (event.segs) {
+          const text = event.segs.map(s => s.utf8 || '').join('').trim();
+          if (text && text !== '\n') {
+            segments.push({
+              start: (event.tStartMs || 0) / 1000,
+              duration: (event.dDurationMs || 0) / 1000,
+              text,
+            });
+          }
+        }
+      }
+    }
+  } catch {
+    // json3 failed
+  }
+
+  // Fallback: plain text format (no XML parsing needed)
+  if (segments.length === 0) {
+    try {
+      const resp = await fetch(baseUrl);
+      const xml = await resp.text();
+      // Simple regex-based XML parsing (service worker has no DOMParser)
+      const textRegex = /<text\s+start="([^"]*)"(?:\s+dur="([^"]*)")?[^>]*>([\s\S]*?)<\/text>/g;
+      let m;
+      while ((m = textRegex.exec(xml)) !== null) {
+        const rawText = m[3].replace(/<[^>]+>/g, '').trim();
+        if (rawText) {
+          segments.push({
+            start: parseFloat(m[1]) || 0,
+            duration: parseFloat(m[2]) || 0,
+            text: rawText,
+          });
+        }
+      }
+    } catch {
+      // XML also failed
+    }
+  }
+
+  if (segments.length === 0) return { noTranscript: true };
+
+  // Build language info
+  let language = track.name?.simpleText || track.languageCode || 'Unknown';
+  if (method === 'english') language = 'English (' + (track.kind === 'asr' ? 'auto-generated' : 'manual') + ')';
+  else if (method === 'english-auto') language = 'English (auto-generated)';
+  else if (method === 'translated') language = 'Translated from ' + (track.name?.simpleText || track.languageCode);
+  else if (method === 'original') language = (track.name?.simpleText || track.languageCode) + ' (no English available)';
+
+  return { segments, language };
+}
+
+// ============================================================================
+// Transcript Extraction (Main World — fallback)
 // ============================================================================
 
 async function extractTranscriptInMainWorld(tabId, videoId) {
