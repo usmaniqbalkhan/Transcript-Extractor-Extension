@@ -8,6 +8,16 @@
 // ============================================================================
 
 const els = {
+  // Auth screen
+  authScreen: document.getElementById('authScreen'),
+  authSignInBtn: document.getElementById('authSignInBtn'),
+  authStatus: document.getElementById('authStatus'),
+  authErrorMsg: document.getElementById('authErrorMsg'),
+  // Main app
+  mainApp: document.getElementById('mainApp'),
+  userBadge: document.getElementById('userBadge'),
+  userAvatar: document.getElementById('userAvatar'),
+  signOutBtn: document.getElementById('signOutBtn'),
   pageStatusIcon: document.getElementById('pageStatusIcon'),
   pageStatusText: document.getElementById('pageStatusText'),
   channelOptions: document.getElementById('channelOptions'),
@@ -100,52 +110,30 @@ async function sendToContentScript(tabId, message) {
 // ============================================================================
 
 document.addEventListener('DOMContentLoaded', async () => {
-  // Auth guard — verify the user is still authenticated before showing the popup.
-  // If not, close this window (the service worker will show the auth page on next click).
-  try {
-    const authOk = await new Promise((resolve) => {
-      chrome.runtime.sendMessage({ action: 'checkAuth' }, (resp) => {
-        if (chrome.runtime.lastError) { resolve(false); return; }
-        resolve(resp && resp.authenticated);
+  // Check stored auth state first — decide which screen to show
+  const storedAuth = await getStoredAuth();
+  if (storedAuth && storedAuth.email) {
+    // Verify token is still valid (non-interactive)
+    const tokenValid = await new Promise((resolve) => {
+      chrome.identity.getAuthToken({ interactive: false }, (token) => {
+        if (chrome.runtime.lastError || !token) {
+          resolve(false);
+        } else {
+          resolve(true);
+        }
       });
     });
-    if (!authOk) {
-      // Not authenticated — close this popup window
-      window.close();
-      return;
+
+    if (tokenValid) {
+      showMainApp(storedAuth.email);
+    } else {
+      // Token expired — clear and show auth screen
+      await clearStoredAuth();
+      showAuthScreen();
     }
-  } catch {
-    // Service worker unavailable — allow popup to load (best effort)
+  } else {
+    showAuthScreen();
   }
-
-  // Detect current tab
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tab) {
-    currentTabId = tab.id;
-    els.urlInput.value = tab.url || '';
-    detectPageState(tab);
-  }
-
-  // Check for saved progress
-  checkSavedProgress();
-
-  // Check if extraction is already in progress
-  try {
-    chrome.runtime.sendMessage({ action: 'getState' }, (response) => {
-      if (chrome.runtime.lastError) return; // service worker not ready
-      if (response && response.phase === 'fetching') {
-        showProgressUI();
-        updateProgress(response.progress);
-      } else if (response && response.phase === 'done') {
-        showResults(response);
-      }
-    });
-  } catch {
-    // Service worker not ready yet
-  }
-
-  // Setup keep-alive
-  setupKeepAlive();
 });
 
 // ============================================================================
@@ -203,6 +191,12 @@ els.clearHistoryBtn.addEventListener('click', () => {
     els.clearHistoryBtn.classList.add('hidden');
   });
 });
+
+// Auth screen — Continue with Google
+els.authSignInBtn.addEventListener('click', handleSignIn);
+
+// Main app — Sign out
+els.signOutBtn.addEventListener('click', handleSignOut);
 
 // Load playlists button
 els.loadPlaylistsBtn.addEventListener('click', async () => {
@@ -544,6 +538,134 @@ function showError(msg) {
 
 function hideError() {
   els.errorSection.classList.add('hidden');
+}
+
+// ============================================================================
+// Auth — inline gate (Grammarly-style)
+// ============================================================================
+
+function showAuthScreen() {
+  els.authScreen.classList.remove('hidden');
+  els.mainApp.classList.add('hidden');
+}
+
+async function showMainApp(email) {
+  els.authScreen.classList.add('hidden');
+  els.mainApp.classList.remove('hidden');
+
+  // Show user badge with initials
+  if (email) {
+    const initials = email.charAt(0).toUpperCase();
+    els.userAvatar.textContent = initials;
+    els.userBadge.classList.remove('hidden');
+  }
+
+  // Initialize main app
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (tab) {
+    currentTabId = tab.id;
+    els.urlInput.value = tab.url || '';
+    detectPageState(tab);
+  }
+
+  checkSavedProgress();
+
+  try {
+    chrome.runtime.sendMessage({ action: 'getState' }, (response) => {
+      if (chrome.runtime.lastError) return;
+      if (response && response.phase === 'fetching') {
+        showProgressUI();
+        updateProgress(response.progress);
+      } else if (response && response.phase === 'done') {
+        showResults(response);
+      }
+    });
+  } catch {
+    // Service worker not ready
+  }
+
+  setupKeepAlive();
+}
+
+function handleSignIn() {
+  els.authSignInBtn.disabled = true;
+  els.authStatus.textContent = 'Connecting...';
+  els.authErrorMsg.textContent = '';
+
+  chrome.identity.getAuthToken({ interactive: true }, (token) => {
+    if (chrome.runtime.lastError) {
+      els.authErrorMsg.textContent = chrome.runtime.lastError.message || 'Sign-in failed';
+      els.authSignInBtn.disabled = false;
+      els.authStatus.textContent = '';
+      return;
+    }
+    if (!token) {
+      els.authErrorMsg.textContent = 'Sign-in was cancelled.';
+      els.authSignInBtn.disabled = false;
+      els.authStatus.textContent = '';
+      return;
+    }
+
+    els.authStatus.textContent = 'Getting profile...';
+
+    chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }, async (userInfo) => {
+      if (chrome.runtime.lastError || !userInfo || !userInfo.email) {
+        els.authErrorMsg.textContent = 'Could not retrieve email. Check extension permissions.';
+        els.authSignInBtn.disabled = false;
+        els.authStatus.textContent = '';
+        return;
+      }
+
+      // Save auth state for persistence
+      await storeAuth({ email: userInfo.email, signedInAt: Date.now() });
+
+      // Transition to main app
+      showMainApp(userInfo.email);
+    });
+  });
+}
+
+function handleSignOut() {
+  chrome.identity.getAuthToken({ interactive: false }, (token) => {
+    if (chrome.runtime.lastError || !token) {
+      doSignOut();
+      return;
+    }
+    chrome.identity.removeCachedAuthToken({ token }, () => {
+      fetch(`https://accounts.google.com/o/oauth2/revoke?token=${token}`)
+        .catch(() => {})
+        .finally(() => doSignOut());
+    });
+  });
+}
+
+async function doSignOut() {
+  await clearStoredAuth();
+  // Reset UI and show auth screen
+  els.userBadge.classList.add('hidden');
+  els.authSignInBtn.disabled = false;
+  els.authStatus.textContent = '';
+  els.authErrorMsg.textContent = '';
+  showAuthScreen();
+}
+
+// Storage helpers
+function getStoredAuth() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get('authState', (data) => resolve(data.authState || null));
+  });
+}
+
+function storeAuth(authData) {
+  return new Promise((resolve) => {
+    chrome.storage.local.set({ authState: authData }, resolve);
+  });
+}
+
+function clearStoredAuth() {
+  return new Promise((resolve) => {
+    chrome.storage.local.remove('authState', resolve);
+  });
 }
 
 // ============================================================================

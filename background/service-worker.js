@@ -45,61 +45,6 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 // ============================================================================
-// Auth-gated Extension Icon Click
-// ============================================================================
-// Because default_popup is removed, clicking the icon fires this listener.
-// We check auth state and either show the auth page or open the popup.
-
-chrome.action.onClicked.addListener(async (tab) => {
-  const authData = await getStoredAuthState();
-  if (authData && authData.email) {
-    // Verify the token is still valid (non-interactive)
-    chrome.identity.getAuthToken({ interactive: false }, (token) => {
-      if (chrome.runtime.lastError || !token) {
-        // Token expired — clear auth and show login
-        chrome.storage.local.remove('authState');
-        openAuthPage();
-        return;
-      }
-      // Authenticated — open the main popup
-      openPopupAsWindow();
-    });
-  } else {
-    openAuthPage();
-  }
-});
-
-function openAuthPage() {
-  const authUrl = chrome.runtime.getURL('auth.html');
-  chrome.windows.create({
-    url: authUrl,
-    type: 'popup',
-    width: 400,
-    height: 360,
-    focused: true
-  });
-}
-
-function openPopupAsWindow() {
-  const popupUrl = chrome.runtime.getURL('popup/popup.html');
-  chrome.windows.create({
-    url: popupUrl,
-    type: 'popup',
-    width: 400,
-    height: 600,
-    focused: true
-  });
-}
-
-function getStoredAuthState() {
-  return new Promise((resolve) => {
-    chrome.storage.local.get('authState', (data) => {
-      resolve(data.authState || null);
-    });
-  });
-}
-
-// ============================================================================
 // Message Handler
 // ============================================================================
 
@@ -107,34 +52,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const { action } = message;
 
   switch (action) {
-    case 'authStateChanged':
-      // Auth page notifies us; no action needed beyond acknowledgment
-      sendResponse({ success: true });
-      return false;
-
-    case 'openPopup':
-      // Auth page asks us to open the main popup after sign-in
-      openPopupAsWindow();
-      sendResponse({ success: true });
-      return false;
-
-    case 'checkAuth':
-      // Popup can verify auth is still valid
-      getStoredAuthState().then(auth => {
-        if (auth && auth.email) {
-          chrome.identity.getAuthToken({ interactive: false }, (token) => {
-            if (chrome.runtime.lastError || !token) {
-              chrome.storage.local.remove('authState');
-              sendResponse({ authenticated: false });
-            } else {
-              sendResponse({ authenticated: true, email: auth.email });
-            }
-          });
-        } else {
-          sendResponse({ authenticated: false });
-        }
-      });
-      return true;
     case 'startExtraction':
       handleStart(message.config).then(r => sendResponse(r)).catch(e => sendResponse({ error: e.message }));
       return true;
