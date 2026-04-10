@@ -8,11 +8,16 @@
 // ============================================================================
 
 const els = {
-  signInBtn: document.getElementById('signInBtn'),
-  authInfo: document.getElementById('authInfo'),
-  authEmail: document.getElementById('authEmail'),
+  // Auth screen
+  authScreen: document.getElementById('authScreen'),
+  authSignInBtn: document.getElementById('authSignInBtn'),
+  authStatus: document.getElementById('authStatus'),
+  authErrorMsg: document.getElementById('authErrorMsg'),
+  // Main app
+  mainApp: document.getElementById('mainApp'),
+  userBadge: document.getElementById('userBadge'),
+  userAvatar: document.getElementById('userAvatar'),
   signOutBtn: document.getElementById('signOutBtn'),
-  authError: document.getElementById('authError'),
   pageStatusIcon: document.getElementById('pageStatusIcon'),
   pageStatusText: document.getElementById('pageStatusText'),
   channelOptions: document.getElementById('channelOptions'),
@@ -105,37 +110,30 @@ async function sendToContentScript(tabId, message) {
 // ============================================================================
 
 document.addEventListener('DOMContentLoaded', async () => {
-  // Detect current tab
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tab) {
-    currentTabId = tab.id;
-    els.urlInput.value = tab.url || '';
-    detectPageState(tab);
-  }
-
-  // Check for saved progress
-  checkSavedProgress();
-
-  // Check if extraction is already in progress
-  try {
-    chrome.runtime.sendMessage({ action: 'getState' }, (response) => {
-      if (chrome.runtime.lastError) return; // service worker not ready
-      if (response && response.phase === 'fetching') {
-        showProgressUI();
-        updateProgress(response.progress);
-      } else if (response && response.phase === 'done') {
-        showResults(response);
-      }
+  // Check stored auth state first — decide which screen to show
+  const storedAuth = await getStoredAuth();
+  if (storedAuth && storedAuth.email) {
+    // Verify token is still valid (non-interactive)
+    const tokenValid = await new Promise((resolve) => {
+      chrome.identity.getAuthToken({ interactive: false }, (token) => {
+        if (chrome.runtime.lastError || !token) {
+          resolve(false);
+        } else {
+          resolve(true);
+        }
+      });
     });
-  } catch {
-    // Service worker not ready yet
+
+    if (tokenValid) {
+      showMainApp(storedAuth.email);
+    } else {
+      // Token expired — clear and show auth screen
+      await clearStoredAuth();
+      showAuthScreen();
+    }
+  } else {
+    showAuthScreen();
   }
-
-  // Setup keep-alive
-  setupKeepAlive();
-
-  // Check if user is already signed in (non-interactive)
-  checkExistingAuth();
 });
 
 // ============================================================================
@@ -194,10 +192,10 @@ els.clearHistoryBtn.addEventListener('click', () => {
   });
 });
 
-// Sign in button
-els.signInBtn.addEventListener('click', handleSignIn);
+// Auth screen — Continue with Google
+els.authSignInBtn.addEventListener('click', handleSignIn);
 
-// Sign out button
+// Main app — Sign out
 els.signOutBtn.addEventListener('click', handleSignOut);
 
 // Load playlists button
@@ -543,102 +541,131 @@ function hideError() {
 }
 
 // ============================================================================
-// Google Sign-In
+// Auth — inline gate (Grammarly-style)
 // ============================================================================
 
-function checkExistingAuth() {
-  // Non-interactive check — see if user already has a token cached
-  chrome.identity.getAuthToken({ interactive: false }, (token) => {
-    if (chrome.runtime.lastError || !token) {
-      console.log('[Auth] No cached token found.');
-      return;
-    }
-    console.log('[Auth] Found cached token, fetching profile...');
-    fetchAndShowProfile();
-  });
+function showAuthScreen() {
+  els.authScreen.classList.remove('hidden');
+  els.mainApp.classList.add('hidden');
 }
 
-async function handleSignIn() {
-  els.signInBtn.disabled = true;
-  els.signInBtn.textContent = 'Signing in...';
-  els.authError.classList.add('hidden');
+async function showMainApp(email) {
+  els.authScreen.classList.add('hidden');
+  els.mainApp.classList.remove('hidden');
+
+  // Show user badge with initials
+  if (email) {
+    const initials = email.charAt(0).toUpperCase();
+    els.userAvatar.textContent = initials;
+    els.userBadge.classList.remove('hidden');
+  }
+
+  // Initialize main app
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (tab) {
+    currentTabId = tab.id;
+    els.urlInput.value = tab.url || '';
+    detectPageState(tab);
+  }
+
+  checkSavedProgress();
+
+  try {
+    chrome.runtime.sendMessage({ action: 'getState' }, (response) => {
+      if (chrome.runtime.lastError) return;
+      if (response && response.phase === 'fetching') {
+        showProgressUI();
+        updateProgress(response.progress);
+      } else if (response && response.phase === 'done') {
+        showResults(response);
+      }
+    });
+  } catch {
+    // Service worker not ready
+  }
+
+  setupKeepAlive();
+}
+
+function handleSignIn() {
+  els.authSignInBtn.disabled = true;
+  els.authStatus.textContent = 'Connecting...';
+  els.authErrorMsg.textContent = '';
 
   chrome.identity.getAuthToken({ interactive: true }, (token) => {
     if (chrome.runtime.lastError) {
-      const errMsg = chrome.runtime.lastError.message || 'Sign-in failed';
-      console.error('[Auth] getAuthToken error:', errMsg);
-      showAuthError(errMsg);
-      els.signInBtn.disabled = false;
-      els.signInBtn.textContent = 'Sign in with Google';
+      els.authErrorMsg.textContent = chrome.runtime.lastError.message || 'Sign-in failed';
+      els.authSignInBtn.disabled = false;
+      els.authStatus.textContent = '';
       return;
     }
     if (!token) {
-      showAuthError('No token received. Sign-in may have been cancelled.');
-      els.signInBtn.disabled = false;
-      els.signInBtn.textContent = 'Sign in with Google';
+      els.authErrorMsg.textContent = 'Sign-in was cancelled.';
+      els.authSignInBtn.disabled = false;
+      els.authStatus.textContent = '';
       return;
     }
-    console.log('[Auth] Token obtained successfully.');
-    fetchAndShowProfile();
-  });
-}
 
-function fetchAndShowProfile() {
-  chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }, (userInfo) => {
-    if (chrome.runtime.lastError) {
-      console.warn('[Auth] getProfileUserInfo error:', chrome.runtime.lastError.message);
-      showAuthError('Could not retrieve user info.');
-      els.signInBtn.disabled = false;
-      els.signInBtn.textContent = 'Sign in with Google';
-      return;
-    }
-    if (userInfo && userInfo.email) {
-      console.log('[Auth] Signed in as:', userInfo.email);
-      els.signInBtn.classList.add('hidden');
-      els.authInfo.classList.remove('hidden');
-      els.authEmail.textContent = userInfo.email;
-      els.authError.classList.add('hidden');
-    } else {
-      console.warn('[Auth] getProfileUserInfo returned no email.', userInfo);
-      showAuthError('Signed in but email not available. Check extension permissions.');
-      els.signInBtn.disabled = false;
-      els.signInBtn.textContent = 'Sign in with Google';
-    }
+    els.authStatus.textContent = 'Getting profile...';
+
+    chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }, async (userInfo) => {
+      if (chrome.runtime.lastError || !userInfo || !userInfo.email) {
+        els.authErrorMsg.textContent = 'Could not retrieve email. Check extension permissions.';
+        els.authSignInBtn.disabled = false;
+        els.authStatus.textContent = '';
+        return;
+      }
+
+      // Save auth state for persistence
+      await storeAuth({ email: userInfo.email, signedInAt: Date.now() });
+
+      // Transition to main app
+      showMainApp(userInfo.email);
+    });
   });
 }
 
 function handleSignOut() {
   chrome.identity.getAuthToken({ interactive: false }, (token) => {
     if (chrome.runtime.lastError || !token) {
-      resetAuthUI();
+      doSignOut();
       return;
     }
-    // Revoke the token, then clear it from Chrome's cache
     chrome.identity.removeCachedAuthToken({ token }, () => {
-      console.log('[Auth] Token removed from cache.');
-      // Also revoke remotely so re-sign-in shows account picker
       fetch(`https://accounts.google.com/o/oauth2/revoke?token=${token}`)
-        .catch(() => {}) // Best effort
-        .finally(() => {
-          resetAuthUI();
-        });
+        .catch(() => {})
+        .finally(() => doSignOut());
     });
   });
 }
 
-function resetAuthUI() {
-  els.signInBtn.classList.remove('hidden');
-  els.signInBtn.disabled = false;
-  els.signInBtn.textContent = 'Sign in with Google';
-  els.authInfo.classList.add('hidden');
-  els.authEmail.textContent = '';
-  els.authError.classList.add('hidden');
-  console.log('[Auth] Signed out.');
+async function doSignOut() {
+  await clearStoredAuth();
+  // Reset UI and show auth screen
+  els.userBadge.classList.add('hidden');
+  els.authSignInBtn.disabled = false;
+  els.authStatus.textContent = '';
+  els.authErrorMsg.textContent = '';
+  showAuthScreen();
 }
 
-function showAuthError(msg) {
-  els.authError.textContent = msg;
-  els.authError.classList.remove('hidden');
+// Storage helpers
+function getStoredAuth() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get('authState', (data) => resolve(data.authState || null));
+  });
+}
+
+function storeAuth(authData) {
+  return new Promise((resolve) => {
+    chrome.storage.local.set({ authState: authData }, resolve);
+  });
+}
+
+function clearStoredAuth() {
+  return new Promise((resolve) => {
+    chrome.storage.local.remove('authState', resolve);
+  });
 }
 
 // ============================================================================

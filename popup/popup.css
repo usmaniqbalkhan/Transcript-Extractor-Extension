@@ -14,95 +14,234 @@ body {
   overflow-y: auto;
 }
 
-.header {
-  background: linear-gradient(135deg, #c62828, #ad1457);
-  padding: 14px 16px;
+/* ============================================================
+   AUTH SCREEN — Grammarly-style inline login gate
+   ============================================================ */
+
+.auth-screen {
+  width: 100%;
+  min-height: 480px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse at 30% 20%, rgba(229, 57, 53, 0.12) 0%, transparent 60%),
+    radial-gradient(ellipse at 70% 80%, rgba(173, 20, 87, 0.10) 0%, transparent 60%),
+    #1a1a2e;
+}
+
+.auth-screen.hidden { display: none; }
+
+.auth-orb {
+  position: absolute;
+  top: -60px;
+  right: -60px;
+  width: 180px;
+  height: 180px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(229, 57, 53, 0.18), transparent 70%);
+  pointer-events: none;
+  animation: orbFloat 6s ease-in-out infinite alternate;
+}
+
+@keyframes orbFloat {
+  0%   { transform: translate(0, 0) scale(1); }
+  100% { transform: translate(-15px, 20px) scale(1.1); }
+}
+
+.auth-screen-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 36px 28px 28px;
+  position: relative;
+  z-index: 1;
+  animation: authFadeIn 0.4s ease-out;
+}
+
+@keyframes authFadeIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.auth-logo {
+  margin-bottom: 18px;
+  filter: drop-shadow(0 4px 16px rgba(229, 57, 53, 0.3));
+}
+
+.auth-title {
+  font-size: 20px;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: 0.3px;
   text-align: center;
 }
 
+.auth-desc {
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, 0.55);
+  text-align: center;
+  line-height: 1.5;
+  margin-top: 8px;
+  max-width: 280px;
+}
+
+.auth-features {
+  display: flex;
+  gap: 6px;
+  margin-top: 18px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.auth-pill {
+  padding: 4px 10px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.65);
+  letter-spacing: 0.2px;
+}
+
+/* Google Sign-In Button */
+.auth-google-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  max-width: 280px;
+  margin-top: 26px;
+  padding: 12px 20px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: #fff;
+  color: #3c4043;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: box-shadow 0.2s, transform 0.12s;
+}
+
+.auth-google-btn:hover {
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
+  transform: translateY(-1px);
+}
+
+.auth-google-btn:active {
+  transform: translateY(0);
+  box-shadow: none;
+}
+
+.auth-google-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.auth-google-icon {
+  flex-shrink: 0;
+}
+
+.auth-status {
+  margin-top: 14px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.45);
+  text-align: center;
+  min-height: 16px;
+}
+
+.auth-error-msg {
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: #ef5350;
+  text-align: center;
+  min-height: 16px;
+  max-width: 280px;
+}
+
+.auth-footer {
+  margin-top: 20px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.25);
+  text-align: center;
+}
+
+/* ============================================================
+   MAIN APP wrapper
+   ============================================================ */
+
+.main-app.hidden { display: none; }
+
+/* Header (updated for user badge) */
+.header {
+  background: linear-gradient(135deg, #c62828, #ad1457);
+  padding: 12px 16px;
+}
+
+.header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
 .header h1 {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 700;
   color: #fff;
   letter-spacing: 0.5px;
 }
 
 .header .subtitle {
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.75);
-  margin-top: 3px;
+  font-size: 10.5px;
+  color: rgba(255, 255, 255, 0.7);
+  margin-top: 2px;
 }
 
-/* Auth Bar */
-.auth-bar {
-  padding: 8px 16px;
-  background: rgba(255, 255, 255, 0.03);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+/* User badge in header */
+.user-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.user-badge.hidden { display: none; }
+
+.user-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 36px;
+  letter-spacing: 0;
+  text-transform: uppercase;
 }
 
-.auth-sign-in-btn {
-  padding: 5px 14px;
-  border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  background: rgba(66, 133, 244, 0.15);
-  color: #8ab4f8;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.auth-sign-in-btn:hover {
-  background: rgba(66, 133, 244, 0.25);
-}
-
-.auth-sign-in-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.auth-info {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  justify-content: space-between;
-}
-
-.auth-email {
-  font-size: 11px;
-  color: #8ab4f8;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.auth-sign-out-btn {
+.sign-out-btn {
   padding: 3px 8px;
   border-radius: 4px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: transparent;
-  color: #9e9e9e;
-  font-size: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 10px;
+  font-family: inherit;
   cursor: pointer;
-  white-space: nowrap;
   transition: background 0.15s;
 }
 
-.auth-sign-out-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #e0e0e0;
-}
-
-.auth-error {
-  font-size: 11px;
-  color: #ef5350;
-  text-align: center;
-  width: 100%;
+.sign-out-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
 }
 
 .section {
