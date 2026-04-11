@@ -509,92 +509,117 @@ async function workerLoop(queue, tabId) {
 // page-level poToken/bot-detection that blocks MAIN world API calls.
 
 async function extractTranscriptDirect(videoId) {
-  let captionTracks = null;
-
-  // Client configs to try in order
-  const clients = [
-    {
-      clientName: 'WEB',
-      clientVersion: '2.20250401.00.00',
-      clientId: '1',
-    },
-    {
-      clientName: 'WEB_EMBEDDED_PLAYER',
-      clientVersion: '2.0',
-      clientId: '56',
-      thirdParty: { embedUrl: 'https://www.youtube.com/' },
-    },
-  ];
-
-  for (const client of clients) {
-    if (captionTracks && captionTracks.length > 0) break;
-    try {
-      const body = {
-        videoId,
+  // ================================================================
+  // Method 1: get_transcript endpoint (primary — does NOT require poToken)
+  // This is YouTube's dedicated transcript API, separate from the player API.
+  // ================================================================
+  try {
+    const params = encodeGetTranscriptParams(videoId);
+    const resp = await fetch('https://www.youtube.com/youtubei/v1/get_transcript?prettyPrint=false', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-YouTube-Client-Name': '1',
+        'X-YouTube-Client-Version': '2.20250312.04.00',
+      },
+      body: JSON.stringify({
         context: {
           client: {
-            clientName: client.clientName,
-            clientVersion: client.clientVersion,
+            clientName: 'WEB',
+            clientVersion: '2.20250312.04.00',
             hl: 'en',
             gl: 'US',
           }
-        }
-      };
-      if (client.thirdParty) {
-        body.context.thirdParty = client.thirdParty;
-      }
-
-      const resp = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Youtube-Client-Name': client.clientId,
-          'X-Youtube-Client-Version': client.clientVersion,
         },
-        body: JSON.stringify(body),
-      });
-      const data = await resp.json();
-      captionTracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-    } catch {
-      // Try next client
+        params
+      })
+    });
+    const data = await resp.json();
+    const segments = parseGetTranscriptResponse(data);
+    if (segments.length > 0) {
+      return { segments, language: 'English (transcript)' };
     }
+  } catch {
+    // get_transcript failed — try fallback methods
   }
 
-  // Fallback: scrape the video watch page HTML
+  // ================================================================
+  // Method 2: Scrape embed page HTML for caption tracks
+  // Embed pages return full HTML (not SPA JSON) and don't need poToken.
+  // ================================================================
+  let captionTracks = null;
+  try {
+    const pageResp = await fetch(`https://www.youtube.com/embed/${videoId}`, {
+      headers: { 'Accept-Language': 'en-US,en;q=0.9' },
+    });
+    const html = await pageResp.text();
+
+    const patterns = [
+      /ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;/s,
+      /var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;/s,
+    ];
+
+    for (const pattern of patterns) {
+      const match = html.match(pattern);
+      if (!match) continue;
+      try {
+        const jsonStr = match[1];
+        let depth = 0, endIdx = 0;
+        for (let i = 0; i < jsonStr.length; i++) {
+          if (jsonStr[i] === '{') depth++;
+          else if (jsonStr[i] === '}') { depth--; if (depth === 0) { endIdx = i + 1; break; } }
+        }
+        if (endIdx > 0) {
+          const playerData = JSON.parse(jsonStr.substring(0, endIdx));
+          captionTracks = playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+          if (captionTracks && captionTracks.length > 0) break;
+        }
+      } catch { continue; }
+    }
+  } catch {
+    // Embed page fetch failed
+  }
+
+  // ================================================================
+  // Method 3: Innertube player API (legacy fallback — may require poToken)
+  // ================================================================
   if (!captionTracks || captionTracks.length === 0) {
-    try {
-      const pageResp = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
-        headers: {
-          'Accept-Language': 'en-US,en;q=0.9',
-        },
-      });
-      const html = await pageResp.text();
+    const clients = [
+      { clientName: 'WEB', clientVersion: '2.20250312.04.00', clientId: '1' },
+      { clientName: 'WEB_EMBEDDED_PLAYER', clientVersion: '2.0', clientId: '56',
+        thirdParty: { embedUrl: 'https://www.youtube.com/' } },
+    ];
 
-      const patterns = [
-        /var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;\s*(?:var|<\/script>)/s,
-        /ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;/s,
-      ];
+    for (const client of clients) {
+      if (captionTracks && captionTracks.length > 0) break;
+      try {
+        const body = {
+          videoId,
+          context: {
+            client: {
+              clientName: client.clientName,
+              clientVersion: client.clientVersion,
+              hl: 'en',
+              gl: 'US',
+            }
+          }
+        };
+        if (client.thirdParty) body.context.thirdParty = client.thirdParty;
 
-      for (const pattern of patterns) {
-        const match = html.match(pattern);
-        if (!match) continue;
-        try {
-          // Find balanced braces for proper JSON extraction
-          const jsonStr = match[1];
-          let depth = 0, endIdx = 0;
-          for (let i = 0; i < jsonStr.length; i++) {
-            if (jsonStr[i] === '{') depth++;
-            else if (jsonStr[i] === '}') { depth--; if (depth === 0) { endIdx = i + 1; break; } }
-          }
-          if (endIdx > 0) {
-            const playerData = JSON.parse(jsonStr.substring(0, endIdx));
-            captionTracks = playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-            if (captionTracks && captionTracks.length > 0) break;
-          }
-        } catch { continue; }
+        const resp = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Youtube-Client-Name': client.clientId,
+            'X-Youtube-Client-Version': client.clientVersion,
+          },
+          body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        captionTracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+      } catch {
+        // Try next client
       }
-    } catch {
-      // Page fetch failed
     }
   }
 
@@ -647,12 +672,11 @@ async function extractTranscriptDirect(videoId) {
     // json3 failed
   }
 
-  // Fallback: plain text format (no XML parsing needed)
+  // Fallback: plain XML format (regex-based, no DOMParser in service worker)
   if (segments.length === 0) {
     try {
       const resp = await fetch(baseUrl);
       const xml = await resp.text();
-      // Simple regex-based XML parsing (service worker has no DOMParser)
       const textRegex = /<text\s+start="([^"]*)"(?:\s+dur="([^"]*)")?[^>]*>([\s\S]*?)<\/text>/g;
       let m;
       while ((m = textRegex.exec(xml)) !== null) {
@@ -706,207 +730,218 @@ async function extractTranscriptInMainWorld(tabId, videoId) {
 
 /**
  * This function runs in the MAIN world (YouTube's page context).
- * It has access to same-origin fetch and YouTube's JS globals (ytcfg, ytInitialPlayerResponse).
+ * It has access to same-origin fetch, cookies, and YouTube's JS globals.
  */
 async function mainWorldExtractTranscript(videoId) {
   try {
-    let captionTracks = null;
-
-    // Method 1: Use ytcfg (YouTube's config object available on page) for proper API key
-    try {
-      // Get API key and client version from YouTube's page config
-      const ytcfg = window.ytcfg;
-      const apiKey = ytcfg?.get?.('INNERTUBE_API_KEY') || 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
-      const clientVersion = ytcfg?.get?.('INNERTUBE_CLIENT_VERSION') || '2.20241201.00.00';
-      const clientName = ytcfg?.get?.('INNERTUBE_CLIENT_NAME') || 'WEB';
-      const visitorData = ytcfg?.get?.('VISITOR_DATA') || '';
-
-      const response = await fetch(`https://www.youtube.com/youtubei/v1/player?key=${apiKey}&prettyPrint=false`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Youtube-Client-Name': String(clientName === 'WEB' ? 1 : clientName),
-          'X-Youtube-Client-Version': clientVersion,
-        },
-        credentials: 'include',
-        body: JSON.stringify({
-          videoId: videoId,
-          context: {
-            client: {
-              clientName: typeof clientName === 'string' ? clientName : 'WEB',
-              clientVersion: clientVersion,
-              hl: 'en',
-              gl: 'US',
-              visitorData: visitorData,
-            }
-          },
-          playbackContext: {
-            contentPlaybackContext: {
-              signatureTimestamp: ytcfg?.get?.('STS') || undefined
-            }
-          }
-        })
-      });
-
-      const data = await response.json();
-      captionTracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-    } catch (e) {
-      // Fall through to method 1b
+    // ---- Helper: encode protobuf params for get_transcript ----
+    function encodeParams(vid) {
+      const bytes = [0x0A, vid.length];
+      for (let i = 0; i < vid.length; i++) bytes.push(vid.charCodeAt(i));
+      return btoa(String.fromCharCode(...bytes));
     }
 
-    // Method 1b: Use WEB_EMBEDDED_PLAYER client — bypasses poToken requirement
-    if (!captionTracks || captionTracks.length === 0) {
+    // ---- Helper: parse get_transcript response ----
+    function parseResponse(data) {
+      const segs = [];
       try {
-        const ytcfg = window.ytcfg;
-        const apiKey = ytcfg?.get?.('INNERTUBE_API_KEY') || 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
+        const actions = data?.actions;
+        if (!actions) return segs;
+        for (const action of actions) {
+          const body = action?.updateEngagementPanelAction?.content
+            ?.transcriptRenderer?.content
+            ?.transcriptSearchPanelRenderer?.body
+            ?.transcriptSegmentListRenderer?.initialSegments;
+          if (!body) continue;
+          for (const item of body) {
+            const r = item?.transcriptSegmentRenderer;
+            if (!r) continue;
+            const text = r.snippet?.runs?.map(x => x.text || '').join('').trim();
+            if (text) {
+              segs.push({
+                start: (parseInt(r.startMs) || 0) / 1000,
+                duration: ((parseInt(r.endMs) || 0) - (parseInt(r.startMs) || 0)) / 1000,
+                text
+              });
+            }
+          }
+        }
+      } catch {}
+      return segs;
+    }
 
-        const response = await fetch(`https://www.youtube.com/youtubei/v1/player?key=${apiKey}&prettyPrint=false`, {
+    // ---- Helper: balanced-brace JSON extraction ----
+    function extractJSON(str) {
+      let depth = 0, end = 0;
+      for (let i = 0; i < str.length; i++) {
+        if (str[i] === '{') depth++;
+        else if (str[i] === '}') { depth--; if (depth === 0) { end = i + 1; break; } }
+      }
+      if (end > 0) {
+        try { return JSON.parse(str.substring(0, end)); } catch {}
+      }
+      return null;
+    }
+
+    let captionTracks = null;
+
+    // ================================================================
+    // Method 1: get_transcript endpoint (primary — does NOT need poToken)
+    // Uses YouTube's dedicated transcript API with page cookies/auth.
+    // ================================================================
+    try {
+      const params = encodeParams(videoId);
+      const ytcfg = window.ytcfg;
+      const apiKey = ytcfg?.get?.('INNERTUBE_API_KEY') || 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
+      const clientVersion = ytcfg?.get?.('INNERTUBE_CLIENT_VERSION') || '2.20250312.04.00';
+
+      const resp = await fetch(
+        `https://www.youtube.com/youtubei/v1/get_transcript?key=${apiKey}&prettyPrint=false`,
+        {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'X-Youtube-Client-Name': '56',
-            'X-Youtube-Client-Version': '2.0',
+            'X-YouTube-Client-Name': '1',
+            'X-YouTube-Client-Version': clientVersion,
           },
           credentials: 'include',
           body: JSON.stringify({
-            videoId: videoId,
             context: {
               client: {
-                clientName: 'WEB_EMBEDDED_PLAYER',
-                clientVersion: '2.0',
+                clientName: 'WEB',
+                clientVersion: clientVersion,
                 hl: 'en',
                 gl: 'US',
-              },
-              thirdParty: {
-                embedUrl: 'https://www.youtube.com/'
+              }
+            },
+            params
+          })
+        }
+      );
+
+      const data = await resp.json();
+      const segments = parseResponse(data);
+      if (segments.length > 0) {
+        return { segments, language: 'English (transcript)' };
+      }
+    } catch {
+      // get_transcript failed
+    }
+
+    // ================================================================
+    // Method 2: Fetch embed page for caption tracks
+    // Embed pages always return full HTML (not SPA JSON).
+    // ================================================================
+    try {
+      const resp = await fetch(`https://www.youtube.com/embed/${videoId}`, {
+        credentials: 'include',
+        headers: { 'Accept': 'text/html,application/xhtml+xml' }
+      });
+      const html = await resp.text();
+
+      for (const pat of [
+        /ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;/s,
+        /var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;/s,
+      ]) {
+        const m = html.match(pat);
+        if (!m) continue;
+        const obj = extractJSON(m[1]);
+        if (obj?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length > 0) {
+          captionTracks = obj.captions.playerCaptionsTracklistRenderer.captionTracks;
+          break;
+        }
+      }
+    } catch {
+      // Embed page failed
+    }
+
+    // ================================================================
+    // Method 3: ytInitialPlayerResponse on the current page
+    // ================================================================
+    if (!captionTracks?.length) {
+      try {
+        captionTracks = window.ytInitialPlayerResponse?.captions
+          ?.playerCaptionsTracklistRenderer?.captionTracks;
+      } catch {}
+    }
+
+    // ================================================================
+    // Method 4: Innertube player API with page credentials
+    // ================================================================
+    if (!captionTracks?.length) {
+      try {
+        const ytcfg = window.ytcfg;
+        const apiKey = ytcfg?.get?.('INNERTUBE_API_KEY') || 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
+        const clientVersion = ytcfg?.get?.('INNERTUBE_CLIENT_VERSION') || '2.20250312.04.00';
+        const visitorData = ytcfg?.get?.('VISITOR_DATA') || '';
+
+        const resp = await fetch(`https://www.youtube.com/youtubei/v1/player?key=${apiKey}&prettyPrint=false`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Youtube-Client-Name': '1',
+            'X-Youtube-Client-Version': clientVersion,
+          },
+          credentials: 'include',
+          body: JSON.stringify({
+            videoId,
+            context: {
+              client: {
+                clientName: 'WEB',
+                clientVersion: clientVersion,
+                hl: 'en',
+                gl: 'US',
+                visitorData,
+              }
+            },
+            playbackContext: {
+              contentPlaybackContext: {
+                signatureTimestamp: ytcfg?.get?.('STS') || undefined
               }
             }
           })
         });
 
-        const data = await response.json();
+        const data = await resp.json();
         captionTracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-      } catch {
-        // Fall through to method 2
-      }
+      } catch {}
     }
 
-    // Method 2: Check if ytInitialPlayerResponse is available on the page
-    if (!captionTracks || captionTracks.length === 0) {
-      try {
-        if (window.ytInitialPlayerResponse) {
-          captionTracks = window.ytInitialPlayerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-        }
-      } catch {
-        // Not available
-      }
-    }
-
-    // Method 3: Fetch the video page HTML and parse ytInitialPlayerResponse
-    if (!captionTracks || captionTracks.length === 0) {
-      try {
-        const pageResp = await fetch(`https://www.youtube.com/watch?v=${videoId}&has_verified=1`, {
-          credentials: 'include',
-          headers: {
-            'Accept': 'text/html',
-            'Accept-Language': 'en-US,en;q=0.9',
-          }
-        });
-        const html = await pageResp.text();
-
-        // Try multiple regex patterns for ytInitialPlayerResponse
-        let playerData = null;
-        const patterns = [
-          /var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;/s,
-          /ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;/s,
-          /"captions"\s*:\s*(\{.+?"captionTracks".+?\})/s,
-        ];
-
-        for (const pattern of patterns) {
-          const match = html.match(pattern);
-          if (match) {
-            try {
-              playerData = JSON.parse(match[1]);
-              break;
-            } catch {
-              // Try fixing truncated JSON - find the matching closing brace
-              try {
-                const jsonStr = match[1];
-                // Find balanced braces
-                let depth = 0;
-                let endIdx = 0;
-                for (let i = 0; i < jsonStr.length; i++) {
-                  if (jsonStr[i] === '{') depth++;
-                  else if (jsonStr[i] === '}') {
-                    depth--;
-                    if (depth === 0) { endIdx = i + 1; break; }
-                  }
-                }
-                if (endIdx > 0) {
-                  playerData = JSON.parse(jsonStr.substring(0, endIdx));
-                }
-              } catch {
-                continue;
-              }
-            }
-          }
-        }
-
-        if (playerData) {
-          captionTracks = playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks
-            || playerData?.captionTracks;
-        }
-      } catch {
-        // No captions available
-      }
-    }
-
-    if (!captionTracks || captionTracks.length === 0) {
+    // ================================================================
+    // No caption tracks found by any method
+    // ================================================================
+    if (!captionTracks?.length) {
       return { noTranscript: true };
     }
 
-    // Select best caption track (matching Python tool's language priority)
-    // 1. Manual English  2. Auto English  3. Translated to English  4. Any
+    // Select best caption track (priority: manual EN > auto EN > translatable > any)
     let selected = null;
-    // 1. Manual English
-    let tr = captionTracks.find(t => t.languageCode && t.languageCode.startsWith('en') && t.kind !== 'asr');
-    if (tr) { selected = { track: tr, method: 'english' }; }
-    // 2. Auto-generated English
+    let tr = captionTracks.find(t => t.languageCode?.startsWith('en') && t.kind !== 'asr');
+    if (tr) selected = { track: tr, method: 'english' };
     if (!selected) {
-      tr = captionTracks.find(t => t.languageCode && t.languageCode.startsWith('en'));
-      if (tr) { selected = { track: tr, method: 'english-auto' }; }
+      tr = captionTracks.find(t => t.languageCode?.startsWith('en'));
+      if (tr) selected = { track: tr, method: 'english-auto' };
     }
-    // 3. Any translated to English
     if (!selected) {
       tr = captionTracks.find(t => t.isTranslatable !== false);
-      if (tr) { selected = { track: tr, method: 'translated', tlang: 'en' }; }
+      if (tr) selected = { track: tr, method: 'translated', tlang: 'en' };
     }
-    // 4. Any available
     if (!selected && captionTracks.length > 0) {
       selected = { track: captionTracks[0], method: 'original' };
     }
-
-    if (!selected) {
-      return { noTranscript: true };
-    }
+    if (!selected) return { noTranscript: true };
 
     const { track, method, tlang } = selected;
     let baseUrl = track.baseUrl;
+    if (tlang) baseUrl += (baseUrl.includes('?') ? '&' : '?') + 'tlang=' + tlang;
 
-    // Add translation language if needed
-    if (tlang) {
-      baseUrl += (baseUrl.includes('?') ? '&' : '?') + 'tlang=' + tlang;
-    }
-
-    // Fetch transcript — try json3 format first, then XML
+    // Fetch transcript — json3 first, then XML
     let segments = [];
 
-    // Try json3
     try {
       const json3Url = baseUrl + (baseUrl.includes('?') ? '&' : '?') + 'fmt=json3';
       const resp = await fetch(json3Url, { credentials: 'include' });
       const data = await resp.json();
-
       if (data.events) {
         for (const event of data.events) {
           if (event.segs) {
@@ -915,62 +950,44 @@ async function mainWorldExtractTranscript(videoId) {
               segments.push({
                 start: (event.tStartMs || 0) / 1000,
                 duration: (event.dDurationMs || 0) / 1000,
-                text: text
+                text
               });
             }
           }
         }
       }
-    } catch {
-      // json3 failed
-    }
+    } catch {}
 
-    // Fallback: try default format (XML timedtext)
     if (segments.length === 0) {
       try {
         const resp = await fetch(baseUrl, { credentials: 'include' });
         const xml = await resp.text();
         const parser = new DOMParser();
         const doc = parser.parseFromString(xml, 'text/xml');
-
-        // Handle both <text> (legacy) and <p> (srv3) elements
-        const textNodes = doc.querySelectorAll('text, p, body text, body p');
-
+        const textNodes = doc.querySelectorAll('text, p');
         textNodes.forEach(node => {
           const text = node.textContent.trim();
           if (text) {
             const startAttr = node.getAttribute('start') || node.getAttribute('t');
             const durAttr = node.getAttribute('dur') || node.getAttribute('d');
-            // 't' and 'd' attributes are in milliseconds, 'start' and 'dur' in seconds
             const isMs = node.hasAttribute('t') || node.hasAttribute('d');
             segments.push({
               start: parseFloat(startAttr || 0) / (isMs ? 1000 : 1),
               duration: parseFloat(durAttr || 0) / (isMs ? 1000 : 1),
-              text: text
+              text
             });
           }
         });
-      } catch {
-        // XML also failed
-      }
+      } catch {}
     }
 
-    if (segments.length === 0) {
-      return { noTranscript: true };
-    }
+    if (segments.length === 0) return { noTranscript: true };
 
-    // Build language info string
     let language = track.name?.simpleText || track.languageCode || 'Unknown';
-    if (method === 'english') {
-      const isAuto = track.kind === 'asr';
-      language = 'English (' + (isAuto ? 'auto-generated' : 'manual') + ')';
-    } else if (method === 'english-auto') {
-      language = 'English (auto-generated)';
-    } else if (method === 'translated') {
-      language = 'Translated from ' + (track.name?.simpleText || track.languageCode);
-    } else if (method === 'original') {
-      language = (track.name?.simpleText || track.languageCode) + ' (no English available)';
-    }
+    if (method === 'english') language = 'English (' + (track.kind === 'asr' ? 'auto-generated' : 'manual') + ')';
+    else if (method === 'english-auto') language = 'English (auto-generated)';
+    else if (method === 'translated') language = 'Translated from ' + (track.name?.simpleText || track.languageCode);
+    else if (method === 'original') language = (track.name?.simpleText || track.languageCode) + ' (no English available)';
 
     return { segments, language };
 
@@ -1422,6 +1439,52 @@ function decodeHTMLEntities(text) {
     .replace(/&#x2F;/g, '/')
     .replace(/\n/g, ' ')
     .trim();
+}
+
+/**
+ * Encode a video ID into protobuf params for the get_transcript endpoint.
+ * Format: field 1 (LEN) containing the video ID string.
+ */
+function encodeGetTranscriptParams(videoId) {
+  const bytes = [0x0A, videoId.length];
+  for (let i = 0; i < videoId.length; i++) bytes.push(videoId.charCodeAt(i));
+  return btoa(String.fromCharCode(...bytes));
+}
+
+/**
+ * Parse the response from YouTube's get_transcript endpoint.
+ * Returns an array of { start, duration, text } segments.
+ */
+function parseGetTranscriptResponse(data) {
+  const segments = [];
+  try {
+    const actions = data?.actions;
+    if (!actions) return segments;
+    for (const action of actions) {
+      const body = action?.updateEngagementPanelAction?.content
+        ?.transcriptRenderer?.content
+        ?.transcriptSearchPanelRenderer?.body
+        ?.transcriptSegmentListRenderer?.initialSegments;
+      if (!body) continue;
+      for (const item of body) {
+        const seg = item?.transcriptSegmentRenderer;
+        if (!seg) continue;
+        const text = seg.snippet?.runs?.map(r => r.text || '').join('').trim();
+        if (text) {
+          const startMs = parseInt(seg.startMs) || 0;
+          const endMs = parseInt(seg.endMs) || 0;
+          segments.push({
+            start: startMs / 1000,
+            duration: (endMs - startMs) / 1000,
+            text
+          });
+        }
+      }
+    }
+  } catch {
+    // Parse error
+  }
+  return segments;
 }
 
 function sleep(ms) {
